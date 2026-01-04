@@ -354,17 +354,19 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
             "content-type",
             "application/x-www-form-urlencoded; charset=UTF-8",
         )
-        .body(body)
+        .body(body.clone())
         .send()
         .await?
         .json()
         .await?;
 
     // Extract RTMP information from the response
+    let mut wrong = false;
     if response["code"].as_i64() == Some(0) {
         if let Some(rtmp_data) = response["data"]["rtmp"].as_object() {
             if let (Some(addr), Some(code)) = (rtmp_data.get("addr"), rtmp_data.get("code")) {
                 if let (Some(rtmp_url), Some(rtmp_key)) = (addr.as_str(), code.as_str()) {
+                    if rtmp_key == "" { wrong = true; }
                     // Update config with new RTMP info
                     cfg.bililive.bili_rtmp_url = rtmp_url.to_string();
                     cfg.bililive.bili_rtmp_key = rtmp_key.to_string();
@@ -374,9 +376,15 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
                     std::fs::write(&*CONFIG_PATH, updated_json)?;
 
                     // tracing::info!("Updated RTMP information in config");
-                }
-            }
-        }
+                } else { wrong = true; }
+            } else { wrong = true; }
+        } else { wrong = true; }
+    } else { wrong = true; }
+    if wrong {
+        tracing::error!("Failed to start live: {}", response);
+        tracing::info!("request cookie: {}", cookie);
+        tracing::info!("request body: {}", body);
+        return Err("Failed to start live".into());
     }
 
     Ok(())
