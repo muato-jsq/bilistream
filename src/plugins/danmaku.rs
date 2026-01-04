@@ -459,7 +459,7 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
         let (live_title, live_topic) = if platform.eq_ignore_ascii_case("YT") {
             // get youtube live status
             match get_youtube_status(channel_id_str).await {
-                Ok((_, topic, title, _, _)) => {
+                Ok((_, topic, title, _, _, _)) => {
                     let t = match title {
                         Some(t) => t,
                         None => {
@@ -491,7 +491,7 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
         } else {
             // TW
             match get_twitch_status(channel_id_str).await {
-                Ok((is_live, topic, title)) => {
+                Ok((is_live, topic, title, _)) => {
                     if !is_live {
                         tracing::error!("TW频道 {:?} 未在直播", channel_name.clone().unwrap());
                         let _ = bilibili::send_danmaku(
@@ -547,14 +547,6 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
         // Now you can use channel_id_str where needed without moving channel_id
         // let new_title = format!("【转播】{}", channel_name);
         let updated_area_id = check_area_id_with_title(&live_topic_title, area_id);
-        // Additional checks for specific area_ids
-        if (updated_area_id == 240 || updated_area_id == 318)
-            && channel_name.as_deref() != Some("Kamito")
-        {
-            tracing::error!("只有'Kamito'可以使用 Apex, COD 分区. Skipping...");
-            let _ = bilibili::send_danmaku(&cfg, "错误：只有'Kamito'可以使用 Apex, COD 分区").await;
-            return;
-        }
 
         let updated_area_name = match get_area_name(updated_area_id) {
             Some(name) => name,

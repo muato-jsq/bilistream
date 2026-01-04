@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use crate::config::load_config;
@@ -56,6 +56,83 @@ pub fn get_status_cache() -> Option<StatusData> {
     cache.clone()
 }
 
+// Update status cache with fresh configuration data (config fields only)
+pub async fn refresh_status_cache_config() {
+    if let Ok(cfg) = load_config().await {
+        let mut cached_status = get_status_cache().unwrap_or_default();
+
+        // Update YouTube status with fresh config (preserve live status)
+        if !cfg.youtube.channel_id.is_empty() {
+            let yt_area_name = crate::plugins::get_area_name(cfg.youtube.area_v2)
+                .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.youtube.area_v2));
+
+            if let Some(ref mut yt_status) = cached_status.youtube {
+                // Update only configuration fields, preserve live status
+                yt_status.channel_name = cfg.youtube.channel_name.clone();
+                yt_status.channel_id = cfg.youtube.channel_id.clone();
+                yt_status.area_id = cfg.youtube.area_v2;
+                yt_status.area_name = yt_area_name;
+                yt_status.quality = cfg.youtube.quality.clone();
+                // Keep existing: is_live, title, topic
+            } else {
+                // Create new status entry with default live status
+                cached_status.youtube = Some(YtStatus {
+                    is_live: false,
+                    title: Some("-".to_string()),
+                    channel_name: cfg.youtube.channel_name.clone(),
+                    channel_id: cfg.youtube.channel_id.clone(),
+                    area_id: cfg.youtube.area_v2,
+                    area_name: yt_area_name,
+                    topic: Some("-".to_string()),
+                    quality: cfg.youtube.quality.clone(),
+                });
+            }
+        }
+
+        // Update Twitch status with fresh config (preserve live status)
+        if !cfg.twitch.channel_id.is_empty() {
+            let tw_area_name = crate::plugins::get_area_name(cfg.twitch.area_v2)
+                .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.twitch.area_v2));
+
+            if let Some(ref mut tw_status) = cached_status.twitch {
+                // Update only configuration fields, preserve live status
+                tw_status.channel_name = cfg.twitch.channel_name.clone();
+                tw_status.channel_id = cfg.twitch.channel_id.clone();
+                tw_status.area_id = cfg.twitch.area_v2;
+                tw_status.area_name = tw_area_name;
+                tw_status.quality = cfg.twitch.quality.clone();
+                // Keep existing: is_live, title, game
+            } else {
+                // Create new status entry with default live status
+                cached_status.twitch = Some(TwStatus {
+                    is_live: false,
+                    title: Some("-".to_string()),
+                    channel_name: cfg.twitch.channel_name.clone(),
+                    channel_id: cfg.twitch.channel_id.clone(),
+                    area_id: cfg.twitch.area_v2,
+                    area_name: tw_area_name,
+                    game: Some("-".to_string()),
+                    quality: cfg.twitch.quality.clone(),
+                });
+            }
+        }
+
+        update_status_cache(cached_status);
+    }
+}
+
+// Refresh live status in background (like refresh buttons)
+pub async fn refresh_live_status_background() {
+    // Spawn background tasks to refresh live status without blocking
+    tokio::spawn(async {
+        let _ = refresh_youtube_status().await;
+    });
+
+    tokio::spawn(async {
+        let _ = refresh_twitch_status().await;
+    });
+}
+
 #[derive(Serialize)]
 pub struct ApiResponse<T> {
     success: bool,
@@ -69,14 +146,14 @@ impl<T: Serialize> IntoResponse for ApiResponse<T> {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct StatusData {
     pub bilibili: BiliStatus,
     pub youtube: Option<YtStatus>,
     pub twitch: Option<TwStatus>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 pub struct BiliStatus {
     pub is_live: bool,
     pub title: String,
@@ -94,6 +171,8 @@ pub struct YtStatus {
     pub channel_name: String,
     pub channel_id: String,
     pub quality: String,
+    pub area_id: u64,
+    pub area_name: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -104,6 +183,8 @@ pub struct TwStatus {
     pub channel_name: String,
     pub channel_id: String,
     pub quality: String,
+    pub area_id: u64,
+    pub area_name: String,
 }
 
 pub async fn get_status() -> impl IntoResponse {
@@ -118,7 +199,7 @@ pub async fn get_status() -> impl IntoResponse {
             }
 
             let error_msg = if e.to_string().contains("Permission denied") {
-                format!("配置文件权限错误: {}。请确保 config.yaml 文件存在且有读取权限，或在可执行文件所在目录运行程序。", e)
+                format!("配置文件权限错误: {}。请确保 config.json 文件存在且有读取权限，或在可执行文件所在目录运行程序。", e)
             } else if is_not_found {
                 "配置文件不存在，请完成首次设置".to_string()
             } else {
@@ -212,10 +293,13 @@ pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
     let config_json = json!({
         "interval": cfg.interval,
         "auto_cover": cfg.auto_cover,
-        "anti_collision": cfg.enable_anti_collision,
+        "enable_anti_collision": cfg.enable_anti_collision,
         "enable_lol_monitor": cfg.enable_lol_monitor,
+        "lol_monitor_interval": cfg.lol_monitor_interval,
         "riot_api_key": cfg.riot_api_key.clone().unwrap_or_default(),
         "holodex_api_key": cfg.holodex_api_key.clone().unwrap_or_default(),
+        "proxy": cfg.proxy.clone(),
+        "anti_collision_list": cfg.anti_collision_list.clone(),
         "bilibili": {
             "room": cfg.bililive.room,
             "enable_danmaku_command": cfg.bililive.enable_danmaku_command,
@@ -229,6 +313,7 @@ pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
             "channel_name": cfg.twitch.channel_name,
             "channel_id": cfg.twitch.channel_id,
             "area_v2": cfg.twitch.area_v2,
+            "oauth_token": cfg.twitch.oauth_token,
             "proxy_region": cfg.twitch.proxy_region,
         }
     });
@@ -240,9 +325,15 @@ pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
 pub struct UpdateConfigRequest {
     interval: Option<u64>,
     auto_cover: Option<bool>,
-    anti_collision: Option<bool>,
+    enable_anti_collision: Option<bool>,
     enable_lol_monitor: Option<bool>,
+    lol_monitor_interval: Option<u64>,
     riot_api_key: Option<String>,
+    holodex_api_key: Option<String>,
+    proxy: Option<String>,
+    twitch_oauth_token: Option<String>,
+    twitch_proxy_region: Option<String>,
+    anti_collision_list: Option<HashMap<String, i32>>,
 }
 
 pub async fn update_config(
@@ -260,16 +351,53 @@ pub async fn update_config(
     if let Some(auto_cover) = payload.auto_cover {
         cfg.auto_cover = auto_cover;
     }
-    if let Some(anti_collision) = payload.anti_collision {
-        cfg.enable_anti_collision = anti_collision;
+    if let Some(enable_anti_collision) = payload.enable_anti_collision {
+        cfg.enable_anti_collision = enable_anti_collision;
     }
     if let Some(enable_lol_monitor) = payload.enable_lol_monitor {
         cfg.enable_lol_monitor = enable_lol_monitor;
     }
+    if let Some(lol_monitor_interval) = payload.lol_monitor_interval {
+        cfg.lol_monitor_interval = Some(lol_monitor_interval);
+    }
     if let Some(riot_api_key) = payload.riot_api_key {
         if !riot_api_key.is_empty() {
             cfg.riot_api_key = Some(riot_api_key);
+        } else {
+            cfg.riot_api_key = None;
         }
+    }
+    if let Some(holodex_api_key) = payload.holodex_api_key {
+        if !holodex_api_key.is_empty() {
+            cfg.holodex_api_key = Some(holodex_api_key);
+        } else {
+            cfg.holodex_api_key = None;
+        }
+    }
+    if let Some(proxy) = payload.proxy {
+        if !proxy.is_empty() {
+            cfg.proxy = Some(proxy);
+        } else {
+            cfg.proxy = None;
+        }
+    }
+
+    // Check if Twitch settings will be updated (before moving values)
+    let twitch_settings_updated =
+        payload.twitch_oauth_token.is_some() || payload.twitch_proxy_region.is_some();
+
+    if let Some(anti_collision_list) = payload.anti_collision_list {
+        cfg.anti_collision_list = anti_collision_list;
+    }
+    if let Some(twitch_oauth_token) = payload.twitch_oauth_token {
+        if !twitch_oauth_token.is_empty() {
+            cfg.twitch.oauth_token = twitch_oauth_token;
+        } else {
+            cfg.twitch.oauth_token = String::new();
+        }
+    }
+    if let Some(twitch_proxy_region) = payload.twitch_proxy_region {
+        cfg.twitch.proxy_region = twitch_proxy_region;
     }
 
     // Save config
@@ -279,6 +407,16 @@ pub async fn update_config(
 
     // Set config updated flag so main loop can detect the change
     set_config_updated();
+
+    // Refresh status cache with updated configuration (for Twitch settings)
+    refresh_status_cache_config().await;
+
+    // Refresh Twitch live status in background if Twitch settings were updated
+    if twitch_settings_updated {
+        tokio::spawn(async {
+            let _ = refresh_twitch_status().await;
+        });
+    }
 
     Ok(ApiResponse {
         success: true,
@@ -454,8 +592,8 @@ pub async fn update_title(
 #[derive(Deserialize)]
 pub struct UpdateChannelRequest {
     platform: String, // "youtube" or "twitch"
-    channel_id: String,
-    channel_name: String,
+    channel_id: Option<String>,
+    channel_name: Option<String>,
     area_id: Option<u64>,
     quality: Option<String>,
     riot_api_key: Option<String>,
@@ -470,8 +608,12 @@ pub async fn update_channel(
 
     match payload.platform.as_str() {
         "youtube" => {
-            cfg.youtube.channel_id = payload.channel_id;
-            cfg.youtube.channel_name = payload.channel_name;
+            if let Some(channel_id) = payload.channel_id {
+                cfg.youtube.channel_id = channel_id;
+            }
+            if let Some(channel_name) = payload.channel_name {
+                cfg.youtube.channel_name = channel_name;
+            }
             if let Some(area_id) = payload.area_id {
                 cfg.youtube.area_v2 = area_id;
                 // If area is LOL (86) and riot_api_key is provided, update it
@@ -488,8 +630,12 @@ pub async fn update_channel(
             }
         }
         "twitch" => {
-            cfg.twitch.channel_id = payload.channel_id;
-            cfg.twitch.channel_name = payload.channel_name;
+            if let Some(channel_id) = payload.channel_id {
+                cfg.twitch.channel_id = channel_id;
+            }
+            if let Some(channel_name) = payload.channel_name {
+                cfg.twitch.channel_name = channel_name;
+            }
             if let Some(area_id) = payload.area_id {
                 cfg.twitch.area_v2 = area_id;
                 // If area is LOL (86) and riot_api_key is provided, update it
@@ -515,6 +661,23 @@ pub async fn update_channel(
 
     // Set config updated flag so main loop can detect the change
     set_config_updated();
+
+    // Refresh status cache with updated configuration
+    refresh_status_cache_config().await;
+
+    // Refresh live status in background for the specific platform only
+    let platform = payload.platform.clone();
+    tokio::spawn(async move {
+        match platform.as_str() {
+            "youtube" => {
+                let _ = refresh_youtube_status().await;
+            }
+            "twitch" => {
+                let _ = refresh_twitch_status().await;
+            }
+            _ => {}
+        }
+    });
 
     Ok(ApiResponse {
         success: true,
@@ -683,6 +846,19 @@ pub async fn save_setup_config(
     cfg.riot_api_key = payload.riot_api_key;
     cfg.enable_lol_monitor = payload.enable_lol_monitor;
 
+    // Track which platforms were updated
+    let youtube_updated = payload.youtube_channel_name.is_some()
+        || payload.youtube_channel_id.is_some()
+        || payload.youtube_area_v2.is_some()
+        || payload.youtube_quality.is_some();
+
+    let twitch_updated = payload.twitch_channel_name.is_some()
+        || payload.twitch_channel_id.is_some()
+        || payload.twitch_area_v2.is_some()
+        || payload.twitch_oauth_token.is_some()
+        || payload.twitch_proxy_region.is_some()
+        || payload.twitch_quality.is_some();
+
     // Update YouTube config if provided
     if let Some(yt_name) = payload.youtube_channel_name {
         cfg.youtube.channel_name = yt_name;
@@ -721,6 +897,22 @@ pub async fn save_setup_config(
     crate::config::save_config(&cfg)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Set config updated flag so main loop can detect the change
+    set_config_updated();
+
+    // Refresh status cache with updated configuration
+    refresh_status_cache_config().await;
+
+    // Refresh live status in background for only the updated platforms
+    tokio::spawn(async move {
+        if youtube_updated {
+            let _ = refresh_youtube_status().await;
+        }
+        if twitch_updated {
+            let _ = refresh_twitch_status().await;
+        }
+    });
 
     Ok(ApiResponse {
         success: true,
@@ -985,29 +1177,6 @@ pub async fn get_deps_status() -> impl IntoResponse {
 }
 
 // Holodex API - Get live/upcoming streams
-#[derive(Serialize, Deserialize, Debug)]
-pub struct HolodexStream {
-    pub id: String,
-    pub title: String,
-    #[serde(rename = "type")]
-    pub stream_type: String,
-    pub topic_id: Option<String>,
-    pub published_at: Option<String>,
-    pub available_at: Option<String>,
-    pub status: String,
-    pub start_scheduled: Option<String>,
-    pub start_actual: Option<String>,
-    pub live_viewers: Option<i32>,
-    #[serde(default)]
-    pub channel: HolodexChannel,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct HolodexChannel {
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-}
 
 #[derive(Serialize, Debug)]
 pub struct HolodexStreamWithArea {
@@ -1025,24 +1194,13 @@ pub struct HolodexStreamWithArea {
     pub suggested_area_name: Option<String>,
 }
 
-pub async fn get_holodex_streams() -> impl IntoResponse {
+pub async fn api_get_holodex_streams() -> impl IntoResponse {
     let cfg = match load_config().await {
         Ok(c) => c,
         Err(e) => {
             return Json(json!({
                 "success": false,
                 "message": format!("Failed to load config: {}", e)
-            }));
-        }
-    };
-
-    // Check if Holodex API key is configured
-    let api_key = match cfg.holodex_api_key {
-        Some(key) if !key.is_empty() => key,
-        _ => {
-            return Json(json!({
-                "success": false,
-                "message": "Holodex API key not configured"
             }));
         }
     };
@@ -1099,37 +1257,13 @@ pub async fn get_holodex_streams() -> impl IntoResponse {
         }));
     }
 
-    // Call Holodex API
-    let channels_param = channel_ids.join(",");
-    let url = format!(
-        "https://holodex.net/api/v2/users/live?channels={}",
-        channels_param
-    );
-
-    let client = reqwest::Client::new();
-    let response = match client.get(&url).header("X-APIKEY", api_key).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return Json(json!({
-                "success": false,
-                "message": format!("Failed to fetch from Holodex: {}", e)
-            }));
-        }
-    };
-
-    if !response.status().is_success() {
-        return Json(json!({
-            "success": false,
-            "message": format!("Holodex API error: {}", response.status())
-        }));
-    }
-
-    let streams: Vec<HolodexStream> = match response.json().await {
+    // Call the new Holodex function from youtube.rs
+    let streams = match crate::plugins::youtube::get_holodex_streams(channel_ids.clone()).await {
         Ok(s) => s,
         Err(e) => {
             return Json(json!({
                 "success": false,
-                "message": format!("Failed to parse Holodex response: {}", e)
+                "message": format!("Failed to fetch from Holodex: {}", e)
             }));
         }
     };
@@ -1256,6 +1390,9 @@ pub async fn get_holodex_streams() -> impl IntoResponse {
 pub struct SwitchToHolodexStream {
     pub channel_id: String,
     pub area_id: Option<u64>,
+    pub title: Option<String>,
+    pub topic_id: Option<String>,
+    pub status: Option<String>,
 }
 
 pub async fn switch_to_holodex_stream(
@@ -1392,12 +1529,42 @@ pub async fn switch_to_holodex_stream(
     // Notify main loop to reload config
     set_config_updated();
 
+    // Use stream data from Holodex monitor (passed from frontend)
+    let is_live = payload
+        .status
+        .as_ref()
+        .map(|s| s == "live")
+        .unwrap_or(false);
+    let stream_title = payload.title.unwrap_or_else(|| "未知标题".to_string());
+    let stream_topic = payload.topic_id.unwrap_or_else(|| "未知".to_string());
+
+    // Update YouTube status cache immediately with stream data from Holodex monitor
+    let mut current_cache = get_status_cache().unwrap_or_default();
+
+    let yt_area_name = crate::plugins::get_area_name(cfg.youtube.area_v2)
+        .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.youtube.area_v2));
+
+    current_cache.youtube = Some(YtStatus {
+        is_live, // From Holodex monitor data
+        title: Some(stream_title.clone()),
+        topic: Some(stream_topic),
+        channel_name: cfg.youtube.channel_name.clone(),
+        channel_id: cfg.youtube.channel_id.clone(),
+        quality: cfg.youtube.quality.clone(),
+        area_id: cfg.youtube.area_v2,
+        area_name: yt_area_name,
+    });
+
+    update_status_cache(current_cache);
+
     Ok(ApiResponse {
         success: true,
         data: Some(()),
         message: Some(format!(
-            "已切换到 {} (分区: {})",
-            cfg.youtube.channel_name, cfg.youtube.area_v2
+            "已切换到 {} (分区: {}) - {}",
+            cfg.youtube.channel_name,
+            cfg.youtube.area_v2,
+            if is_live { "直播中" } else { "预定直播" }
         )),
     })
 }
@@ -1423,10 +1590,12 @@ pub async fn refresh_youtube_status() -> Json<ApiResponse<()>> {
         });
     }
 
-    // Fetch fresh YouTube status using get_youtube_status
-    let (yt_is_live, yt_area, yt_title, _, _) =
-        match crate::plugins::get_youtube_status(&cfg.youtube.channel_id).await {
-            Ok(status) => status,
+    // Fetch fresh YouTube status using Holodex API directly
+    let streams =
+        match crate::plugins::youtube::get_holodex_streams(vec![cfg.youtube.channel_id.clone()])
+            .await
+        {
+            Ok(s) => s,
             Err(e) => {
                 return Json(ApiResponse {
                     success: false,
@@ -1435,6 +1604,38 @@ pub async fn refresh_youtube_status() -> Json<ApiResponse<()>> {
                 });
             }
         };
+
+    // Find the stream for this channel, prioritizing live streams over upcoming ones
+    let (yt_is_live, yt_area, yt_title) = {
+        let channel_streams: Vec<_> = streams
+            .iter()
+            .filter(|s| s.channel.id == cfg.youtube.channel_id)
+            .collect();
+
+        if channel_streams.is_empty() {
+            // No streams found for this channel
+            (false, None, None)
+        } else {
+            // First try to find a live stream
+            if let Some(live_stream) = channel_streams.iter().find(|s| s.status == "live") {
+                let topic = live_stream.topic_id.clone();
+                let title = Some(live_stream.title.clone());
+                (true, topic, title)
+            } else {
+                // No live stream, check for upcoming streams
+                if let Some(upcoming_stream) =
+                    channel_streams.iter().find(|s| s.status == "upcoming")
+                {
+                    let topic = upcoming_stream.topic_id.clone();
+                    let title = Some(upcoming_stream.title.clone());
+                    (false, topic, title)
+                } else {
+                    // No live or upcoming streams
+                    (false, None, None)
+                }
+            }
+        }
+    };
 
     // Get current cache and update only YouTube part
     let mut current_cache = get_status_cache().unwrap_or_else(|| {
@@ -1457,9 +1658,12 @@ pub async fn refresh_youtube_status() -> Json<ApiResponse<()>> {
         is_live: yt_is_live,
         title: yt_title,
         topic: yt_area,
-        channel_name: cfg.youtube.channel_name,
-        channel_id: cfg.youtube.channel_id,
-        quality: cfg.youtube.quality,
+        channel_name: cfg.youtube.channel_name.clone(),
+        channel_id: cfg.youtube.channel_id.clone(),
+        quality: cfg.youtube.quality.clone(),
+        area_id: cfg.youtube.area_v2,
+        area_name: crate::plugins::get_area_name(cfg.youtube.area_v2)
+            .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.youtube.area_v2)),
     });
 
     update_status_cache(current_cache);
@@ -1493,7 +1697,7 @@ pub async fn refresh_twitch_status() -> Json<ApiResponse<()>> {
     }
 
     // Fetch fresh Twitch status using get_twitch_status
-    let (tw_is_live, tw_area, tw_title) =
+    let (tw_is_live, tw_area, tw_title, _) =
         match crate::plugins::get_twitch_status(&cfg.twitch.channel_id).await {
             Ok(status) => status,
             Err(e) => {
@@ -1526,9 +1730,12 @@ pub async fn refresh_twitch_status() -> Json<ApiResponse<()>> {
         is_live: tw_is_live,
         title: tw_title,
         game: tw_area,
-        channel_name: cfg.twitch.channel_name,
-        channel_id: cfg.twitch.channel_id,
-        quality: cfg.twitch.quality,
+        channel_name: cfg.twitch.channel_name.clone(),
+        channel_id: cfg.twitch.channel_id.clone(),
+        quality: cfg.twitch.quality.clone(),
+        area_id: cfg.twitch.area_v2,
+        area_name: crate::plugins::get_area_name(cfg.twitch.area_v2)
+            .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.twitch.area_v2)),
     });
 
     update_status_cache(current_cache);
@@ -1538,4 +1745,431 @@ pub async fn refresh_twitch_status() -> Json<ApiResponse<()>> {
         data: Some(()),
         message: Some("Twitch status refreshed".to_string()),
     })
+}
+
+// Data structures for area and channel management
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Area {
+    pub id: u32,
+    pub name: String,
+    pub title_keywords: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AreasData {
+    pub banned_keywords: Vec<String>,
+    pub areas: Vec<Area>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Channel {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub platforms: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub riot_puuid: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ChannelsData {
+    pub channels: Vec<Channel>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddAreaRequest {
+    pub id: u32,
+    pub name: String,
+    pub title_keywords: Vec<String>,
+    pub aliases: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddChannelRequest {
+    pub name: String,
+    pub aliases: Vec<String>,
+    pub platforms: HashMap<String, String>,
+    pub riot_puuid: Option<String>,
+}
+
+// Get all areas
+pub async fn get_areas_manage() -> Json<ApiResponse<AreasData>> {
+    match std::fs::read_to_string("areas.json") {
+        Ok(data) => match serde_json::from_str::<AreasData>(&data) {
+            Ok(areas) => Json(ApiResponse {
+                success: true,
+                data: Some(areas),
+                message: None,
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to parse areas.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to read areas.json: {}", e)),
+        }),
+    }
+}
+
+// Add new area
+pub async fn add_area(Json(payload): Json<AddAreaRequest>) -> Json<ApiResponse<()>> {
+    // Read current areas
+    let mut areas_data = match std::fs::read_to_string("areas.json") {
+        Ok(data) => match serde_json::from_str::<AreasData>(&data) {
+            Ok(areas) => areas,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse areas.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read areas.json: {}", e)),
+            });
+        }
+    };
+
+    // Check if area ID already exists
+    if areas_data.areas.iter().any(|a| a.id == payload.id) {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Area with ID {} already exists", payload.id)),
+        });
+    }
+
+    // Add new area
+    areas_data.areas.push(Area {
+        id: payload.id,
+        name: payload.name,
+        title_keywords: payload.title_keywords,
+        aliases: payload.aliases,
+    });
+
+    // Sort areas by ID
+    areas_data.areas.sort_by_key(|a| a.id);
+
+    // Write back to file
+    match serde_json::to_string_pretty(&areas_data) {
+        Ok(json_str) => match std::fs::write("areas.json", json_str) {
+            Ok(_) => Json(ApiResponse {
+                success: true,
+                data: Some(()),
+                message: Some("Area added successfully".to_string()),
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to write areas.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to serialize areas data: {}", e)),
+        }),
+    }
+}
+
+// Get all channels
+pub async fn get_channels_manage() -> Json<ApiResponse<ChannelsData>> {
+    match std::fs::read_to_string("channels.json") {
+        Ok(data) => match serde_json::from_str::<ChannelsData>(&data) {
+            Ok(channels) => Json(ApiResponse {
+                success: true,
+                data: Some(channels),
+                message: None,
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to parse channels.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to read channels.json: {}", e)),
+        }),
+    }
+}
+
+// Add new channel
+pub async fn add_channel(Json(payload): Json<AddChannelRequest>) -> Json<ApiResponse<()>> {
+    // Validate that at least one platform is provided
+    if payload.platforms.is_empty() {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(
+                "At least one platform (YouTube or Twitch) must be specified".to_string(),
+            ),
+        });
+    }
+
+    // Read current channels
+    let mut channels_data = match std::fs::read_to_string("channels.json") {
+        Ok(data) => match serde_json::from_str::<ChannelsData>(&data) {
+            Ok(channels) => channels,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse channels.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read channels.json: {}", e)),
+            });
+        }
+    };
+
+    // Check if channel name already exists
+    if channels_data
+        .channels
+        .iter()
+        .any(|c| c.name == payload.name)
+    {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Channel '{}' already exists", payload.name)),
+        });
+    }
+
+    // Add new channel
+    channels_data.channels.push(Channel {
+        name: payload.name,
+        aliases: payload.aliases,
+        platforms: payload.platforms,
+        riot_puuid: payload.riot_puuid,
+    });
+
+    // Write back to file
+    match serde_json::to_string_pretty(&channels_data) {
+        Ok(json_str) => match std::fs::write("channels.json", json_str) {
+            Ok(_) => Json(ApiResponse {
+                success: true,
+                data: Some(()),
+                message: Some("Channel added successfully".to_string()),
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to write channels.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to serialize channels data: {}", e)),
+        }),
+    }
+}
+
+// Update existing channel
+pub async fn update_channel_manage(
+    Json(payload): Json<AddChannelRequest>,
+) -> Json<ApiResponse<()>> {
+    // Validate that at least one platform is provided
+    if payload.platforms.is_empty() {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(
+                "At least one platform (YouTube or Twitch) must be specified".to_string(),
+            ),
+        });
+    }
+
+    // Read current channels
+    let mut channels_data = match std::fs::read_to_string("channels.json") {
+        Ok(data) => match serde_json::from_str::<ChannelsData>(&data) {
+            Ok(channels) => channels,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse channels.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read channels.json: {}", e)),
+            });
+        }
+    };
+
+    // Find and update the channel
+    if let Some(channel) = channels_data
+        .channels
+        .iter_mut()
+        .find(|c| c.name == payload.name)
+    {
+        channel.aliases = payload.aliases;
+        channel.platforms = payload.platforms;
+        channel.riot_puuid = payload.riot_puuid;
+
+        // Write back to file
+        match serde_json::to_string_pretty(&channels_data) {
+            Ok(json_str) => match std::fs::write("channels.json", json_str) {
+                Ok(_) => Json(ApiResponse {
+                    success: true,
+                    data: Some(()),
+                    message: Some("Channel updated successfully".to_string()),
+                }),
+                Err(e) => Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to write channels.json: {}", e)),
+                }),
+            },
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to serialize channels data: {}", e)),
+            }),
+        }
+    } else {
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Channel '{}' not found", payload.name)),
+        })
+    }
+}
+// Delete area by ID
+pub async fn delete_area(
+    axum::extract::Path(id): axum::extract::Path<u32>,
+) -> Json<ApiResponse<()>> {
+    // Read current areas
+    let mut areas_data = match std::fs::read_to_string("areas.json") {
+        Ok(data) => match serde_json::from_str::<AreasData>(&data) {
+            Ok(areas) => areas,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse areas.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read areas.json: {}", e)),
+            });
+        }
+    };
+
+    // Find and remove the area
+    let initial_len = areas_data.areas.len();
+    areas_data.areas.retain(|area| area.id != id);
+
+    if areas_data.areas.len() == initial_len {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Area with ID {} not found", id)),
+        });
+    }
+
+    // Write back to file
+    match serde_json::to_string_pretty(&areas_data) {
+        Ok(json_str) => match std::fs::write("areas.json", json_str) {
+            Ok(_) => Json(ApiResponse {
+                success: true,
+                data: Some(()),
+                message: Some("Area deleted successfully".to_string()),
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to write areas.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to serialize areas data: {}", e)),
+        }),
+    }
+}
+
+// Delete channel by name
+pub async fn delete_channel(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Json<ApiResponse<()>> {
+    // Read current channels
+    let mut channels_data = match std::fs::read_to_string("channels.json") {
+        Ok(data) => match serde_json::from_str::<ChannelsData>(&data) {
+            Ok(channels) => channels,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse channels.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read channels.json: {}", e)),
+            });
+        }
+    };
+
+    // Find and remove the channel
+    let initial_len = channels_data.channels.len();
+    channels_data
+        .channels
+        .retain(|channel| channel.name != name);
+
+    if channels_data.channels.len() == initial_len {
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Channel '{}' not found", name)),
+        });
+    }
+
+    // Write back to file
+    match serde_json::to_string_pretty(&channels_data) {
+        Ok(json_str) => match std::fs::write("channels.json", json_str) {
+            Ok(_) => Json(ApiResponse {
+                success: true,
+                data: Some(()),
+                message: Some("Channel deleted successfully".to_string()),
+            }),
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to write channels.json: {}", e)),
+            }),
+        },
+        Err(e) => Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Failed to serialize channels data: {}", e)),
+        }),
+    }
 }
