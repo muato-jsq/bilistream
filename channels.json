@@ -1,6 +1,13 @@
 {
   "channels": [
     {
+      "name": "シスター・クレア",
+      "aliases": ["クレア","kurea","claire","sister","sis"],
+      "platforms": {
+        "youtube": "UC1zFJrfEKvCixhsjNSb1toQ"
+      }
+    },
+    {
       "name": "Kamito",
       "aliases": ["黑白头","kami酱","kamito"],
       "platforms": {

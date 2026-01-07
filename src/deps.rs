@@ -7,7 +7,7 @@ use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
-const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com/Detteee/bilistream/main";
+const GITHUB_RAW_BASE: &str = "https://raw.githubusercontent.com/muato-jsq/bilistream/main";
 
 // Global download progress tracking
 lazy_static::lazy_static! {

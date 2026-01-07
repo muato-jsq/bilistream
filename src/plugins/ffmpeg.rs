@@ -582,8 +582,8 @@ pub async fn wait_ffmpeg() -> Option<std::process::ExitStatus> {
 
         if let Some(process) = supervisor.as_mut() {
             // Check if process has exited without blocking
-            match process.child.wait().await {
-                Ok(status) => {
+            match process.child.try_wait() {
+                Ok(Some(status)) => {
                     // Process has exited, remove it from supervisor
                     drop(supervisor);
                     let mut supervisor = FFMPEG_SUPERVISOR.lock().await;
@@ -595,6 +595,11 @@ pub async fn wait_ffmpeg() -> Option<std::process::ExitStatus> {
                         tracing::info!("ffmpeg terminated by signal");
                     }
                     return Some(status);
+                }
+                Ok(None) => {
+                    // Process is still running, release lock and wait a bit
+                    drop(supervisor);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
                 Err(e) => {
                     tracing::error!("Failed to check ffmpeg status: {}", e);
