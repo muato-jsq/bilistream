@@ -301,10 +301,16 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             if env::var_os("bili_ffmepg_down").is_none() && !bili_is_live && (area_v2 != 86 || !INVALID_ID_DETECTED.load(Ordering::SeqCst)) {
                 tracing::info!("B站未直播");
                 let area_name = get_area_name(area_v2);
-                bili_start_live(&mut cfg, area_v2).await?;
+                match bili_start_live(&mut cfg, area_v2).await {
+                    Ok(()) => (),
+                    Err(e) => {
+                        tracing::error!("{}", e);
+                        continue;
+                    }
+                }
                 if bili_title != cfg_title {
                     bili_change_live_title(&cfg, &cfg_title).await?;
-                }
+                };
                 tracing::info!(
                     "B站已开播，标题为 {}，分区为 {} （ID: {}）",
                     cfg_title,
@@ -1636,6 +1642,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .about("改变直播标题")
                 .arg(Arg::new("title").required(true).help("新直播标题")),
         )
+        .subcommand(
+            Command::new("face-auth")
+                .about("进行人脸识别")
+                .long_about("进行人脸识别解决无法正常开播的问题"),
+        )
 
         .subcommand(
             Command::new("login")
@@ -1782,6 +1793,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             change_live_title(new_title).await?;
         }
 
+        Some(("face-auth", _)) => {
+            tracing::info!("Starting Bilibili face auth...");
+            let cfg = load_config().await?;
+            bilibili::face_auth(&cfg.bililive.credentials.dede_user_id).await?;
+        }
         Some(("login", _)) => {
             tracing::info!("Starting Bilibili login process...");
             bilibili::login().await?;
@@ -2009,6 +2025,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .value_parser(["YT", "TW", "bilibili", "all"])
                                 .help("检查的平台 (YT, TW, bilibili, all)"),
                         ),
+                )
+                .subcommand(
+                    Command::new("face-auth")
+                        .about("进行人脸识别")
+                        .long_about("进行人脸识别解决无法正常开播的问题"),
                 )
                 .subcommand(Command::new("login").about("登录"))
                 .subcommand(

@@ -942,6 +942,25 @@ pub async fn check_login_status() -> Result<Json<LoginStatusResponse>, StatusCod
     Ok(Json(LoginStatusResponse { logged_in, message }))
 }
 
+pub async fn trigger_face_auth() -> Result<ApiResponse<String>, StatusCode> {
+    // Trigger Bilibili face auth
+    let cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    match bilibili::face_auth(&cfg.bililive.credentials.dede_user_id).await {
+        Ok(_) => Ok(ApiResponse {
+            success: true,
+            data: Some("认证成功".to_string()),
+            message: Some("Bilibili 人脸认证成功".to_string()),
+        }),
+        Err(e) => Ok(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("认证失败: {}", e)),
+        }),
+    }
+}
 pub async fn trigger_login() -> Result<ApiResponse<String>, StatusCode> {
     // Trigger Bilibili login
     match bilibili::login().await {
@@ -962,6 +981,25 @@ pub async fn trigger_login() -> Result<ApiResponse<String>, StatusCode> {
 pub struct QrCodeResponse {
     qr_url: String,
     auth_code: String,
+}
+
+pub async fn get_face_auth_qrcode() -> Result<Json<ApiResponse<QrCodeResponse>>, StatusCode> {
+    let cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    match bilibili::face_auth(&cfg.bililive.credentials.dede_user_id).await {
+        Ok((qr_url, auth_code)) => Ok(Json(ApiResponse {
+            success: true,
+            data: Some(QrCodeResponse { qr_url, auth_code }),
+            message: None,
+        })),
+        Err(e) => Ok(Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("获取二维码失败: {}", e)),
+        })),
+    }
 }
 
 pub async fn get_qr_code() -> Result<Json<ApiResponse<QrCodeResponse>>, StatusCode> {

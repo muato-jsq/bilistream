@@ -381,14 +381,31 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
         } else { wrong = true; }
     } else { wrong = true; }
     if wrong {
-        tracing::error!("Failed to start live: {}", response);
-        tracing::info!("request cookie: {}", cookie);
-        tracing::info!("request body: {}", body);
-        return Err("Failed to start live".into());
+        tracing::debug!("Failed to start live: {}", response);
+        tracing::debug!("request cookie: {}", cookie);
+        tracing::debug!("request body: {}", body);
+        return Err("开播失败，请通过开播认证按钮进行人脸识别!".into());
     }
 
     Ok(())
 }
+
+/// face-auth to Bilibili using QR code
+pub async fn face_auth(mid: &str) -> Result<(String, String), Box<dyn Error>> {
+    // Generate and display QR code
+    let qr_url = format!("bilibili://user_center/auth/verify?mid={}&source_event=400", mid);
+
+    let qr = QrCode::new(qr_url.clone())?;
+    let qr_string = qr
+        .render::<char>()
+        .quiet_zone(false)
+        .module_dimensions(2, 1)
+        .build();
+    println!("Please scan the QR code to face-auth:\n{}", qr_string);
+
+    Ok((qr_url, qr_string))
+}
+
 
 /// Updates the live stream title on Bilibili.
 ///
