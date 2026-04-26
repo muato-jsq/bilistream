@@ -26,6 +26,19 @@
     "じゃんたま",
     "gartic phone"
   ],
+  "streaming_banned_keywords": [
+    "どうぶつの森",
+    "animal crossing",
+    "asmr",
+    "dbd",
+    "dead by daylight",
+    "l4d2",
+    "left 4 dead 2",
+    "gta",
+    "mad town",
+    "watchalong",
+    "watchparty"
+  ],
   "areas": [
     {
       "id": 86,
@@ -296,6 +309,28 @@
       ],
       "aliases": [
         "公司"
+      ]
+    },
+    {
+      "id": 89,
+      "name": "CS:GO",
+      "title_keywords": [
+        "cs:go",
+        "counter-strike",
+        "cs2"
+      ],
+      "aliases": [
+        "csgo",
+        "cs2"
+      ]
+    },
+    {
+      "id": 1023,
+      "name": "ARC Raiders",
+      "title_keywords": [
+        "arc raiders"
+      ],
+      "aliases": [
       ]
     }
   ]

@@ -23,7 +23,6 @@ pub struct Config {
     pub bililive: BiliLive,
     pub twitch: Twitch,
     pub youtube: Youtube,
-    pub proxy: Option<String>,
     pub holodex_api_key: Option<String>,
     pub riot_api_key: Option<String>,
     pub enable_lol_monitor: bool,
@@ -55,6 +54,8 @@ pub struct Credentials {
 /// Struct representing Twitch configuration.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Twitch {
+    #[serde(default = "default_true")]
+    pub enable_monitor: bool,
     #[serde(default)]
     pub channel_name: String,
     #[serde(default)]
@@ -62,16 +63,20 @@ pub struct Twitch {
     #[serde(default)]
     pub channel_id: String,
     #[serde(default)]
-    pub oauth_token: String,
-    #[serde(default)]
     pub proxy_region: String,
     #[serde(default = "default_quality")]
     pub quality: String,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub crop: Option<CropConfig>,
 }
 
 /// Struct representing YouTube configuration.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Youtube {
+    #[serde(default = "default_true")]
+    pub enable_monitor: bool,
     #[serde(default)]
     pub channel_name: String,
     #[serde(default)]
@@ -80,10 +85,33 @@ pub struct Youtube {
     pub area_v2: u64,
     #[serde(default = "default_quality")]
     pub quality: String,
+    #[serde(default)]
+    pub cookies_file: Option<String>,
+    #[serde(default)]
+    pub cookies_from_browser: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+    #[serde(default)]
+    pub deno_path: Option<String>,
+    #[serde(default)]
+    pub crop: Option<CropConfig>,
+}
+
+/// Struct representing crop configuration for video filtering
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CropConfig {
+    pub width: u32,
+    pub height: u32,
+    pub x: u32,
+    pub y: u32,
 }
 
 fn default_quality() -> String {
     "best".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Structs to mirror the structure of cookies.json
@@ -214,8 +242,6 @@ pub async fn load_config() -> Result<Config, Box<dyn Error>> {
             area_v2: u64,
             #[serde(rename = "ChannelId", default)]
             channel_id: String,
-            #[serde(rename = "OauthToken", default)]
-            oauth_token: String,
             #[serde(rename = "ProxyRegion", default)]
             proxy_region: String,
             #[serde(rename = "Quality", default = "default_quality")]
@@ -232,6 +258,10 @@ pub async fn load_config() -> Result<Config, Box<dyn Error>> {
             area_v2: u64,
             #[serde(rename = "Quality", default = "default_quality")]
             quality: String,
+            #[serde(default)]
+            cookies_file: Option<String>,
+            #[serde(default)]
+            cookies_from_browser: Option<String>,
         }
 
         let legacy: LegacyConfig = serde_yaml::from_str(&config_content)
@@ -250,20 +280,27 @@ pub async fn load_config() -> Result<Config, Box<dyn Error>> {
                 credentials: Credentials::default(),
             },
             twitch: Twitch {
+                enable_monitor: true, // Default to enabled for migration
                 channel_name: legacy.twitch.channel_name,
                 area_v2: legacy.twitch.area_v2,
                 channel_id: legacy.twitch.channel_id,
-                oauth_token: legacy.twitch.oauth_token,
                 proxy_region: legacy.twitch.proxy_region,
                 quality: legacy.twitch.quality,
+                proxy: None,
+                crop: None,
             },
             youtube: Youtube {
+                enable_monitor: true, // Default to enabled for migration
                 channel_name: legacy.youtube.channel_name,
                 channel_id: legacy.youtube.channel_id,
                 area_v2: legacy.youtube.area_v2,
                 quality: legacy.youtube.quality,
+                cookies_file: legacy.youtube.cookies_file,
+                cookies_from_browser: legacy.youtube.cookies_from_browser,
+                proxy: legacy.proxy,
+                deno_path: None,
+                crop: None,
             },
-            proxy: legacy.proxy,
             holodex_api_key: legacy.holodex_api_key,
             riot_api_key: legacy.riot_api_key,
             enable_lol_monitor: legacy.enable_lol_monitor,

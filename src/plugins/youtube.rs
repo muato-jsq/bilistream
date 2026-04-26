@@ -49,20 +49,37 @@ fn get_yt_dlp_command() -> String {
     }
 }
 
-// Helper function to create a Command with hidden console on Windows
-fn create_hidden_command(program: &str) -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = Command::new(program);
-        // Hide the console window
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        command
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+#[cfg(target_os = "windows")]
+fn configure_no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+}
+
+// Helper function to add cookies arguments to yt-dlp command
+fn add_cookies_args(
+    command: &mut Command,
+    cookies_file: &Option<String>,
+    cookies_from_browser: &Option<String>,
+) {
+    if let Some(browser) = cookies_from_browser {
+        if !browser.is_empty() {
+            command.arg("--cookies-from-browser");
+            command.arg(browser);
+            return;
+        }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new(program)
+    if let Some(file_path) = cookies_file {
+        if !file_path.is_empty() {
+            command.arg("--cookies");
+            command.arg(file_path);
+        }
     }
 }
 
@@ -145,15 +162,29 @@ pub async fn get_youtube_status(
     Box<dyn Error>,
 > {
     let cfg = load_config().await?;
-    let proxy = cfg.proxy.clone();
+    let proxy = cfg.youtube.proxy.clone();
     let quality = cfg.youtube.quality.clone();
+    let cookies_file = &cfg.youtube.cookies_file;
+    let cookies_from_browser = &cfg.youtube.cookies_from_browser;
+    let deno_path = &cfg.youtube.deno_path;
 
     // Check if Holodex API key is available
     match cfg.holodex_api_key.clone() {
         Some(_key) if !_key.is_empty() => {}
         _ => {
             tracing::info!("Holodex API key not configured, using yt-dlp");
-            return get_status_with_yt_dlp(channel_id, proxy, None, Some(&quality), true).await;
+            let title = get_youtube_live_title(channel_id, true).await?;
+            return get_status_with_yt_dlp(
+                channel_id,
+                proxy,
+                title,
+                Some(&quality),
+                true,
+                cookies_file,
+                cookies_from_browser,
+                deno_path,
+            )
+            .await;
         }
     };
 
@@ -185,14 +216,58 @@ pub async fn get_youtube_status(
                 let title = Some(live_stream.title.clone());
                 let video_id = live_stream.id.clone();
 
-                let (is_live, _, _, m3u8_url, _, _) =
-                    get_status_with_yt_dlp(&video_id, proxy, title.clone(), Some(&quality), false)
-                        .await?;
+                let (is_live, _, _, m3u8_url, _, _) = get_status_with_yt_dlp(
+                    channel_id,
+                    proxy.clone(),
+                    title.clone(),
+                    Some(&quality),
+                    false,
+                    cookies_file,
+                    cookies_from_browser,
+                    deno_path,
+                )
+                .await?;
                 return Ok((is_live, topic, title, m3u8_url, None, Some(video_id)));
             }
 
             // No live stream found, check for upcoming streams
-            if let Some(upcoming_stream) = channel_streams.iter().find(|s| s.status == "upcoming") {
+            // Filter and sort upcoming streams by scheduled time (earliest first)
+            // Also filter out scheduled streams more than 30 hours in the future
+            let now = chrono::Utc::now();
+            let thirty_hours_later = now + chrono::Duration::hours(30);
+
+            let mut upcoming_streams: Vec<_> = channel_streams
+                .iter()
+                .filter(|s| {
+                    if s.status != "upcoming" {
+                        return false;
+                    }
+
+                    // Filter by time (within 30 hours)
+                    if let Some(ref scheduled_time) = s.start_scheduled {
+                        if let Ok(scheduled) = chrono::DateTime::parse_from_rfc3339(scheduled_time)
+                        {
+                            let scheduled_utc = scheduled.with_timezone(&chrono::Utc);
+                            // Only keep if scheduled within next 30 hours
+                            return scheduled_utc <= thirty_hours_later;
+                        }
+                    }
+                    // If we can't parse the time, keep it to be safe
+                    true
+                })
+                .collect();
+
+            if !upcoming_streams.is_empty() {
+                // Sort by scheduled time (earliest first)
+                upcoming_streams.sort_by(|a, b| match (&a.start_scheduled, &b.start_scheduled) {
+                    (Some(time_a), Some(time_b)) => time_a.cmp(time_b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                });
+
+                // Pick the earliest scheduled stream
+                let upcoming_stream = upcoming_streams[0];
                 let topic = upcoming_stream.topic_id.clone();
                 let title = Some(upcoming_stream.title.clone());
                 let video_id = Some(upcoming_stream.id.clone());
@@ -212,9 +287,18 @@ pub async fn get_youtube_status(
         Err(e) => {
             tracing::error!("Holodex API failed: {}, using yt-dlp", e);
             let title = get_youtube_live_title(channel_id, true).await?;
-            let (is_live, _, _, m3u8_url, start_time, video_id) =
-                get_status_with_yt_dlp(channel_id, proxy, None, Some(&quality), true).await?;
-            return Ok((is_live, None, title, m3u8_url, start_time, video_id))
+            let (is_live, _, _, m3u8_url, start_time, video_id) = get_status_with_yt_dlp(
+                channel_id,
+                proxy,
+                None,
+                Some(&quality),
+                true,
+                cookies_file,
+                cookies_from_browser,
+                deno_path,
+            )
+            .await?;
+            Ok((is_live, None, title, m3u8_url, start_time, video_id))
         }
     }
 }
@@ -226,6 +310,9 @@ async fn get_status_with_yt_dlp(
     title: Option<String>,
     quality: Option<&str>,
     is_channel: bool,
+    cookies_file: &Option<String>,
+    cookies_from_browser: &Option<String>,
+    deno_path: &Option<String>,
 ) -> Result<
     (
         bool,                    // is_live
@@ -248,11 +335,26 @@ async fn get_status_with_yt_dlp(
         quality.to_string()
     };
 
-    let mut command = create_hidden_command(&get_yt_dlp_command());
+    let mut command = Command::new(get_yt_dlp_command());
+    #[cfg(target_os = "windows")]
+    configure_no_window(&mut command);
+
+    // Add deno runtime if path is configured
+    if let Some(deno) = deno_path {
+        if !deno.is_empty() {
+            command.arg("--js-runtimes");
+            command.arg(format!("deno:{}", deno));
+        }
+    }
+
     if let Some(proxy) = proxy.clone() {
         command.arg("--proxy");
         command.arg(proxy);
     }
+
+    // Add cookies arguments
+    add_cookies_args(&mut command, cookies_file, cookies_from_browser);
+
     command.arg("-S");
     command.arg(&format_sort);
     command.arg("--print").arg("id");
@@ -332,108 +434,96 @@ async fn get_status_with_yt_dlp(
 
 pub async fn get_youtube_live_title(channel_id: &str, is_channel: bool) -> Result<Option<String>, Box<dyn Error>> {
     let cfg = load_config().await?;
-    let proxy = cfg.proxy.clone();
+    let proxy = cfg.youtube.proxy.clone();
+    let cookies_file = &cfg.youtube.cookies_file;
+    let cookies_from_browser = &cfg.youtube.cookies_from_browser;
     let channel_name = get_channel_name("YT", channel_id).unwrap();
-    let client = reqwest::Client::new();
 
     let yt_url = if is_channel {
         format!("https://www.youtube.com/channel/{}/live", channel_id)
     } else {
         format!("https://www.youtube.com/watch?v={}", channel_id)
     };
-    // Check if Holodex API key is available
-    let holodex_api_key = match cfg.holodex_api_key.clone() {
-        Some(key) if !key.is_empty() => key,
-        _ => {
-            // Fallback to yt-dlp for title
-            let mut command = create_hidden_command(&get_yt_dlp_command());
-            if let Some(proxy) = proxy {
-                command.arg("--proxy").arg(proxy);
-            }
-            command.arg("-e");
-            
-            command.arg(&yt_url);
-            let output = command.output()?;
-            let title_str = String::from_utf8_lossy(&output.stdout);
-            if let Some(title) = title_str.split(" 202").next() {
-                return Ok(Some(title.to_string()));
-            } else {
-                return Ok(Some("空".to_string()));
-            }
+    // Helper function to get title using yt-dlp
+    let get_title_with_ytdlp = || -> Result<Option<String>, Box<dyn Error>> {
+        let mut command = Command::new(get_yt_dlp_command());
+        #[cfg(target_os = "windows")]
+        configure_no_window(&mut command);
+        if let Some(ref p) = proxy {
+            command.arg("--proxy").arg(p);
         }
-    };
+        add_cookies_args(&mut command, cookies_file, cookies_from_browser);
+        command.arg("-e").arg(&yt_url);
 
-    let url = format!(
-        "https://holodex.net/api/v2/users/live?channels={}",
-        channel_id
-    );
-    let response = client
-        .get(&url)
-        .header("X-APIKEY", holodex_api_key)
-        .send()
-        .await?;
-    if response.status().is_success() {
-        let videos: Vec<serde_json::Value> = response.json().await?;
-        if !videos.is_empty() {
-            let mut vid = videos.last().unwrap();
-            let mut flag = false;
-            for video in videos.iter().rev() {
-                let cname = video.get("channel");
-                if cname
-                    .unwrap()
-                    .get("name")
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .replace(" ", "")
-                    .contains(channel_name.as_deref().unwrap_or(""))
-                {
-                    if let Some(topic_id) = video.get("topic_id") {
-                        if topic_id.as_str().unwrap().contains("membersonly") {
-                            // tracing::info!("频道 {} 正在进行会限直播", channel_name);
-                        } else {
-                            vid = video;
-                            flag = true;
-                            break;
-                        }
-                    } else {
-                        vid = video;
-                        flag = true;
-                        break;
-                    }
-                    // let live_topic = video.get("topic_id").unwrap();
-                    // if !live_topic.as_str().unwrap().contains("membersonly") {
-                    //     vid = video;
-                    //     flag = true;
-                    //     break;
-                    // }
-                }
-            }
-            if flag {
-                let title = vid
-                    .get("title")
-                    .and_then(|t| t.as_str())
-                    .map(|s| s.split(" 202").next().unwrap_or(s).to_string());
-                return Ok(title);
-            } else {
-                return Ok(None);
-            }
-        } else {
-            Ok(None)
-        }
-    } else {
-        let mut command = create_hidden_command(&get_yt_dlp_command());
-        if let Some(proxy) = proxy {
-            command.arg("--proxy").arg(proxy);
-        }
-        command.arg("-e");
-        command.arg(&yt_url);
         let output = command.output()?;
         let title_str = String::from_utf8_lossy(&output.stdout);
-        if let Some(title) = title_str.split(" 202").next() {
-            Ok(Some(title.to_string()))
-        } else {
-            Ok(Some("空".to_string()))
+
+        let title = title_str
+            .lines()
+            .filter(|line| {
+                !line.trim().is_empty()
+                    && !line.starts_with("WARNING")
+                    && !line.starts_with("ERROR")
+            })
+            .last()
+            .map(|line| {
+                let re = regex::Regex::new(r"\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}$").unwrap();
+                re.replace(line, "").trim().to_string()
+            })
+            .filter(|s| !s.is_empty());
+
+        Ok(title)
+    };
+
+    // Try Holodex API if key is configured
+    if let Some(key) = cfg.holodex_api_key.clone().filter(|k| !k.is_empty()) {
+        let client = reqwest::Client::new();
+        let url = format!(
+            "https://holodex.net/api/v2/users/live?channels={}",
+            channel_id
+        );
+
+        match client.get(&url).header("X-APIKEY", key).send().await {
+            Ok(response) if response.status().is_success() => {
+                if let Ok(videos) = response.json::<Vec<serde_json::Value>>().await {
+                    if !videos.is_empty() {
+                        for video in videos.iter().rev() {
+                            if let Some(cname) = video
+                                .get("channel")
+                                .and_then(|c| c.get("name"))
+                                .and_then(|n| n.as_str())
+                            {
+                                if cname
+                                    .replace(" ", "")
+                                    .contains(channel_name.as_deref().unwrap_or(""))
+                                {
+                                    if let Some(topic_id) =
+                                        video.get("topic_id").and_then(|t| t.as_str())
+                                    {
+                                        if topic_id.contains("membersonly") {
+                                            continue;
+                                        }
+                                    }
+                                    let title = video
+                                        .get("title")
+                                        .and_then(|t| t.as_str())
+                                        .map(|s| s.to_string());
+                                    return Ok(title);
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(None);
+            }
+            _ => {
+                tracing::warn!("Holodex API failed, falling back to yt-dlp");
+            }
         }
+    } else {
+        // Holodex API key not configured, silently fall back to yt-dlp
     }
+
+    // Fallback to yt-dlp
+    get_title_with_ytdlp()
 }

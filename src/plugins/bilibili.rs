@@ -241,12 +241,12 @@ pub async fn get_bili_live_status(room: i32) -> Result<(bool, String, u64), Box<
     let title = res["data"]["title"].to_string();
     let title = title.trim_matches('"');
 
+    let area_id = res["data"]["area_id"]
+        .as_u64()
+        .ok_or("Missing or invalid area_id in API response")?;
+
     // Determine live status based on the response
-    Ok((
-        res["data"]["live_status"] == 1,
-        title.to_string(),
-        res["data"]["area_id"].as_u64().unwrap(),
-    ))
+    Ok((res["data"]["live_status"] == 1, title.to_string(), area_id))
 }
 
 /// Starts a Bilibili live stream.
@@ -299,7 +299,6 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
 
     // 构造开播参数
     let mut params = BTreeMap::new();
-    params.insert("access_key", "".to_string());
     params.insert("appkey", appkey.to_string());
     params.insert("area_v2", area_v2.to_string());
     params.insert("backup_stream", "0".to_string());
@@ -311,21 +310,27 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
     params.insert("ts", ts.clone());
     params.insert("version", version.clone());
 
-    // Build the query string
+    // Build the query string (sorted by key)
     let query_string = params
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect::<Vec<_>>()
         .join("&");
 
-    // Sign the query string
+    // Sign the query string with appsec
     let mut hasher = Md5::new();
     hasher.update(format!("{}{}", query_string, secret));
     let sign = format!("{:x}", hasher.finalize());
 
-    // Add the sign to the parameters
-    let mut body = query_string.clone();
-    body.push_str(&format!("&sign={}", sign));
+    // Add sign to params
+    params.insert("sign", sign.clone());
+
+    // Build the final query string with all parameters including sign
+    let query_string = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("&");
 
     // Prepare cookies
     let cookie = format!(
@@ -346,19 +351,47 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
         .timeout(Duration::new(30, 0))
         .build()?;
 
-    // POST to the endpoint
+    // POST to the endpoint with query parameters in URL
     let response: Value = client
-        .post("https://api.live.bilibili.com/room/v1/Room/startLive")
+        .post(format!(
+            "https://api.live.bilibili.com/room/v1/Room/startLive?{}",
+            query_string
+        ))
         .header("Accept", "application/json, text/plain, */*")
-        .header(
-            "content-type",
-            "application/x-www-form-urlencoded; charset=UTF-8",
-        )
-        .body(body.clone())
         .send()
         .await?
         .json()
         .await?;
+
+    // Check response code and provide clear error messages
+    let code = response["code"].as_i64().unwrap_or(-1);
+
+    if code != 0 {
+        let message = response["message"]
+            .as_str()
+            .or_else(|| response["msg"].as_str())
+            .unwrap_or("Unknown error");
+
+        match code {
+            60024 => {
+                // Face verification required
+                if let Some(qr_url) = response["data"]["qr"].as_str() {
+                    return Err(format!("FACE_AUTH_REQUIRED:{}", qr_url).into());
+                }
+            }
+            60031 => {
+                // Abnormal streaming behavior - temporary ban
+                tracing::error!("❌ Bilibili 开播失败 (错误码: {})", code);
+                tracing::error!("📛 {}", message);
+                return Err(message.into());
+            }
+            _ => {
+                tracing::error!("❌ Bilibili 开播失败 (错误码: {}): {}", code, message);
+                tracing::debug!("完整响应: {:#?}", response);
+                return Err(format!("开播失败 (错误码 {}): {}", code, message).into());
+            }
+        }
+    }
 
     // Extract RTMP information from the response
     let mut wrong = false;
@@ -383,7 +416,7 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
     if wrong {
         tracing::debug!("Failed to start live: {}", response);
         tracing::debug!("request cookie: {}", cookie);
-        tracing::debug!("request body: {}", body);
+        tracing::debug!("request body: {}", query_string);
         return Err("开播失败，请通过开播认证按钮进行人脸识别!".into());
     }
 
@@ -461,7 +494,29 @@ pub async fn bili_change_live_title(cfg: &Config, title: &str) -> Result<(), Box
         .json()
         .await?;
 
-    // Optionally, handle the response if needed
+    // Check if the API call was successful
+    if let Some(code) = _res.get("code").and_then(|v| v.as_i64()) {
+        if code != 0 {
+            let message = _res
+                .get("message")
+                .or_else(|| _res.get("msg"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知错误");
+
+            // Check for content moderation failure
+            if message.contains("未能通过审核") {
+                return Err(format!(
+                    "⚠️ 标题审核失败: {} - 可能包含敏感词汇，请尝试其他标题",
+                    message
+                )
+                .into());
+            }
+
+            return Err(format!("API调用失败 (code: {}): {}", code, message).into());
+        }
+    }
+
+    // Optionally, print the response for debugging
     // println!("{:#?}", res);
 
     Ok(())
@@ -1083,7 +1138,7 @@ pub async fn login() -> Result<(), Box<dyn Error>> {
     // Generate and display QR code
     let qr_url = qrcode_res["data"]["url"]
         .as_str()
-        .ok_or("Failed to get QR code URL")?;
+        .ok_or("获取二维码 URL 失败")?;
 
     let qr = QrCode::new(qr_url)?;
     let qr_string = qr
@@ -1091,7 +1146,7 @@ pub async fn login() -> Result<(), Box<dyn Error>> {
         .quiet_zone(false)
         .module_dimensions(2, 1)
         .build();
-    println!("Please scan the QR code to login:\n{}", qr_string);
+    println!("请扫描二维码登录:\n{}", qr_string);
 
     // Wait for scan and get login info
     let login_info = credential.login_by_qrcode(qrcode_res).await?;
@@ -1153,7 +1208,7 @@ pub async fn login() -> Result<(), Box<dyn Error>> {
     });
     let cookies_path = Path::new(&bilistream_dir).with_file_name("cookies.json");
     fs::write(cookies_path, serde_json::to_string_pretty(&final_info)?)?;
-    println!("Login successful! Cookies saved to cookies.json");
+    println!("登录成功! Cookies saved to cookies.json");
 
     Ok(())
 }
@@ -1185,20 +1240,16 @@ pub async fn renew() -> Result<(), Box<dyn Error>> {
 }
 
 // Helper function to create a Command with hidden console on Windows
-fn create_hidden_command(program: &str) -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = Command::new(program);
-        // Hide the console window
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        command
-    }
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new(program)
-    }
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+#[cfg(target_os = "windows")]
+fn configure_no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
 }
 
 // Helper function to get yt-dlp command path
@@ -1219,16 +1270,53 @@ fn get_yt_dlp_command() -> String {
     }
 }
 
+// Helper function to get ImageMagick command
+fn get_imagemagick_command() -> String {
+    if cfg!(target_os = "windows") {
+        // On Windows, use convert.exe (renamed from ImageMagick installer)
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let local_convert = exe_dir.join("convert.exe");
+                if local_convert.exists() {
+                    return local_convert.to_string_lossy().to_string();
+                }
+            }
+        }
+        // Try system-installed convert
+        "convert".to_string()
+    } else {
+        // On Linux/macOS, use convert
+        "convert".to_string()
+    }
+}
+
 /// Downloads and processes thumbnail for live streams
 pub async fn get_thumbnail(
     platform: &str,
     channel_id: &str,
     proxy: Option<String>,
-) -> Result<String, Box<dyn Error>> {
-    let mut command = create_hidden_command(&get_yt_dlp_command());
+    cookies_file: &Option<String>,
+    cookies_from_browser: &Option<String>,
+) -> Result<String, anyhow::Error> {
+    let mut command = Command::new(get_yt_dlp_command());
+    #[cfg(target_os = "windows")]
+    configure_no_window(&mut command);
 
     if let Some(proxy_url) = proxy {
         command.arg("--proxy").arg(proxy_url);
+    }
+
+    // Add cookies support for YouTube authentication
+    if let Some(browser) = cookies_from_browser {
+        if !browser.is_empty() {
+            command.arg("--cookies-from-browser");
+            command.arg(browser);
+        }
+    } else if let Some(file_path) = cookies_file {
+        if !file_path.is_empty() {
+            command.arg("--cookies");
+            command.arg(file_path);
+        }
     }
 
     command
@@ -1239,7 +1327,7 @@ pub async fn get_thumbnail(
         .arg(match platform {
             "YT" => format!("https://www.youtube.com/channel/{}/live", channel_id),
             "TW" => format!("https://www.twitch.tv/{}", channel_id),
-            _ => return Err("Unsupported platform".into()),
+            _ => return Err(anyhow::anyhow!("Unsupported platform")),
         })
         .arg("--output")
         .arg("thumbnail");
@@ -1247,24 +1335,29 @@ pub async fn get_thumbnail(
     let output = match command.output() {
         Ok(output) => output,
         Err(e) => {
-            warn!("Failed to execute yt-dlp for thumbnail: {}", e);
+            warn!("yt-dlp 下载封面失败: {}", e);
             return Ok(String::new()); // Return empty string to skip thumbnail
         }
     };
 
     if !output.status.success() {
         warn!(
-            "yt-dlp failed to download thumbnail: {}",
+            "yt-dlp 下载封面失败: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         return Ok(String::new()); // Return empty string to skip thumbnail
     }
 
     // Process the downloaded thumbnail with ImageMagick
-    let convert_output = match create_hidden_command("convert")
+    let convert_cmd = get_imagemagick_command();
+
+    let mut convert_command = Command::new(&convert_cmd);
+    #[cfg(target_os = "windows")]
+    configure_no_window(&mut convert_command);
+    let convert_output = match convert_command
         .arg("thumbnail.jpg")
         .arg("-resize")
-        .arg("640x480") // Force resize to exact dimensions
+        .arg("640x480")
         .arg("-quality")
         .arg("95")
         .arg("cover.jpg")
@@ -1272,14 +1365,14 @@ pub async fn get_thumbnail(
     {
         Ok(output) => output,
         Err(e) => {
-            warn!("Failed to execute ImageMagick convert: {}", e);
+            warn!("ImageMagick 失败: {}", e);
             return Ok(String::new()); // Return empty string to skip thumbnail
         }
     };
 
     if !convert_output.status.success() {
         warn!(
-            "ImageMagick failed to convert thumbnail: {}",
+            "ImageMagick 转换封面失败: {}",
             String::from_utf8_lossy(&convert_output.stderr)
         );
         return Ok(String::new()); // Return empty string to skip thumbnail
@@ -1287,7 +1380,7 @@ pub async fn get_thumbnail(
 
     // Remove the original thumbnail
     if let Err(e) = std::fs::remove_file("thumbnail.jpg") {
-        warn!("Failed to remove original thumbnail file: {}", e);
+        warn!("删除原始封面文件失败: {}", e);
         // Continue anyway, not critical
     }
 

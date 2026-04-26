@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
 static DANMAKU_RUNNING: AtomicBool = AtomicBool::new(false);
+static DANMAKU_STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 lazy_static! {
     static ref DANMAKU_COMMANDS_ENABLED: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
@@ -33,6 +34,14 @@ pub fn is_danmaku_commands_enabled() -> bool {
 
 pub fn set_danmaku_commands_enabled(enabled: bool) {
     DANMAKU_COMMANDS_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_danmaku_stop_signal(stop: bool) {
+    DANMAKU_STOP_SIGNAL.store(stop, Ordering::Relaxed);
+}
+
+pub fn should_stop_danmaku() -> bool {
+    DANMAKU_STOP_SIGNAL.load(Ordering::Relaxed)
 }
 fn load_banned_keywords() -> Vec<String> {
     let areas_path = match std::env::current_exe() {
@@ -127,8 +136,13 @@ pub fn get_channel_id(
     let config = load_channels()?;
 
     for channel in &config.channels {
-        // Check both name and aliases without cloning whole channel
-        if channel.name == channel_name || channel.aliases.iter().any(|a| a == channel_name) {
+        // Check both name and aliases without cloning whole channel (case-insensitive)
+        if channel.name.to_lowercase() == channel_name.to_lowercase()
+            || channel
+                .aliases
+                .iter()
+                .any(|a| a.to_lowercase() == channel_name.to_lowercase())
+        {
             return Ok(match platform {
                 "YT" => channel.platforms.youtube.as_ref().map(|s| s.to_string()),
                 "TW" => channel.platforms.twitch.as_ref().map(|s| s.to_string()),
@@ -171,8 +185,13 @@ pub fn get_puuid(channel_name: &str) -> Result<String, Box<dyn std::error::Error
     let config = load_channels()?;
 
     for channel in &config.channels {
-        // Check both name and aliases
-        if channel.name == channel_name || channel.aliases.iter().any(|a| a == channel_name) {
+        // Check both name and aliases (case-insensitive)
+        if channel.name.to_lowercase() == channel_name.to_lowercase()
+            || channel
+                .aliases
+                .iter()
+                .any(|a| a.to_lowercase() == channel_name.to_lowercase())
+        {
             return Ok(channel
                 .riot_puuid
                 .as_ref()
@@ -228,24 +247,7 @@ fn update_config(
     let mut config: Config = serde_json::from_str(&config_content)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    // Check if update is needed
-    let needs_update = if platform == "YT" {
-        config.youtube.channel_id != channel_id
-            || config.youtube.channel_name != channel_name
-            || config.youtube.area_v2 != area_id
-    } else if platform == "TW" {
-        config.twitch.channel_id != channel_id
-            || config.twitch.channel_name != channel_name
-            || config.twitch.area_v2 != area_id
-    } else {
-        false
-    };
-
-    if !needs_update {
-        return Ok(false);
-    }
-
-    // Update the fields
+    // Update the fields directly (no need to check again since we already checked earlier)
     if platform == "YT" {
         config.youtube.channel_id = channel_id.to_string();
         config.youtube.channel_name = channel_name.to_string();
@@ -305,25 +307,44 @@ pub fn check_area_id_with_title(live_title: &str, current_area_id: u64) -> u64 {
 }
 
 /// Resolve area alias to area name using areas.json
-fn resolve_area_alias(alias: &str) -> &str {
-    let alias_lower = alias.to_lowercase();
+fn resolve_area_alias(alias: &str) -> String {
+    let alias_trimmed = alias.trim();
+    let alias_lower = alias_trimmed.to_lowercase();
 
     // Load areas configuration
     let areas_config = match load_areas_config() {
         Some(config) => config,
-        None => return alias,
+        None => {
+            tracing::warn!("无法加载 areas.json 配置");
+            return alias_trimmed.to_string();
+        }
     };
 
     // Check each area's aliases
     if let Some(areas) = areas_config["areas"].as_array() {
         for area in areas {
-            if let (Some(name), Some(aliases)) = (area["name"].as_str(), area["aliases"].as_array())
-            {
-                for area_alias in aliases {
-                    if let Some(a) = area_alias.as_str() {
-                        if alias_lower == a.to_lowercase() {
-                            // Return a static string by leaking memory (acceptable for small config)
-                            return Box::leak(name.to_string().into_boxed_str());
+            if let Some(name) = area["name"].as_str() {
+                let name_lower = name.to_lowercase();
+
+                // First check if the input matches the area name itself
+                if alias_lower == name_lower {
+                    tracing::debug!("分区别名 '{}' 匹配到分区名称: {}", alias_trimmed, name);
+                    return name.to_string();
+                }
+
+                // Then check aliases
+                if let Some(aliases) = area["aliases"].as_array() {
+                    for area_alias in aliases {
+                        if let Some(a) = area_alias.as_str() {
+                            if alias_lower == a.to_lowercase() {
+                                tracing::debug!(
+                                    "分区别名 '{}' 匹配到别名 '{}', 返回分区: {}",
+                                    alias_trimmed,
+                                    a,
+                                    name
+                                );
+                                return name.to_string();
+                            }
                         }
                     }
                 }
@@ -331,7 +352,8 @@ fn resolve_area_alias(alias: &str) -> &str {
         }
     }
 
-    alias
+    tracing::warn!("未找到分区别名 '{}' 的匹配项", alias_trimmed);
+    alias_trimmed.to_string()
 }
 
 /// Processes a single danmaku command.
@@ -341,11 +363,6 @@ pub async fn process_danmaku(command: &str) {
 
 /// Processes a single danmaku command with owner flag.
 pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
-    // only line start with : is danmaku
-    if command.contains("WARN  [init] Connection closed by server") {
-        tracing::info!("B站cookie过期，无法启动弹幕指令，请更新配置文件:./biliup login");
-        return;
-    }
     if !command.starts_with(" :") {
         return;
     }
@@ -409,8 +426,11 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
         return;
     }
 
+    tracing::info!("原始分区输入: '{}'", area_alias);
     let area_name = resolve_area_alias(area_alias);
-    let area_id = match get_area_id(area_name) {
+    tracing::info!("解析后的分区名称: '{}'", area_name);
+
+    let area_id = match get_area_id(&area_name) {
         Ok(id) => id,
         Err(e) => {
             tracing::error!("{}", e);
@@ -455,6 +475,60 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
                 return;
             }
         };
+
+        // Early config check to avoid expensive live status API calls
+        let exe_path = std::env::current_exe().map_err(|e| {
+            tracing::error!("无法获取可执行文件路径: {}", e);
+        });
+        if let Ok(exe_path) = exe_path {
+            let config_path = exe_path.with_file_name("config.json");
+
+            // Read the existing config.json
+            if let Ok(config_content) = fs::read_to_string(&config_path) {
+                // Deserialize JSON into Config struct
+                if let Ok(config) = serde_json::from_str::<Config>(&config_content) {
+                    // Check if update is needed
+                    let needs_update = if platform == "YT" {
+                        &config.youtube.channel_id != channel_id_str
+                            || &config.youtube.channel_name != channel_name.as_deref().unwrap()
+                            || config.youtube.area_v2 != area_id
+                    } else if platform == "TW" {
+                        &config.twitch.channel_id != channel_id_str
+                            || &config.twitch.channel_name != channel_name.as_deref().unwrap()
+                            || config.twitch.area_v2 != area_id
+                    } else {
+                        false
+                    };
+
+                    if !needs_update {
+                        let area_name = match get_area_name(area_id) {
+                            Some(name) => name,
+                            None => {
+                                tracing::error!("无法获取分区名称");
+                                return;
+                            }
+                        };
+                        let _ = bilibili::send_danmaku(
+                            &cfg,
+                            &format!(
+                                "{} 监听对象已是：{} - {}",
+                                platform,
+                                channel_name.as_deref().unwrap(),
+                                area_name
+                            ),
+                        )
+                        .await;
+                        tracing::info!(
+                            "{} 监听对象已是：{} - {}",
+                            platform,
+                            channel_name.as_deref().unwrap(),
+                            area_name
+                        );
+                        return;
+                    }
+                }
+            }
+        }
 
         let (live_title, live_topic) = if platform.eq_ignore_ascii_case("YT") {
             // get youtube live status
@@ -562,51 +636,31 @@ pub async fn process_danmaku_with_owner(command: &str, is_owner: bool) {
             &channel_id_str,
             updated_area_id,
         ) {
-            Ok(was_updated) => {
-                if !was_updated {
-                    let _ = bilibili::send_danmaku(
-                        &cfg,
-                        &format!(
-                            "{} 监听对象已是：{} - {}",
-                            platform,
-                            channel_name.as_deref().unwrap(),
-                            updated_area_name
-                        ),
-                    )
-                    .await;
-                    tracing::info!(
-                        "{} 监听对象已是：{} - {}",
+            Ok(_) => {
+                // Clear warning flag when user manually changes channel
+                clear_warning_stop();
+
+                // Set config updated flag to skip waiting interval
+                set_config_updated();
+
+                // Send success notification
+                let _ = bilibili::send_danmaku(
+                    &cfg,
+                    &format!(
+                        "更新：{} - {} - {}",
                         platform,
                         channel_name.as_deref().unwrap(),
                         updated_area_name
-                    );
-                    return;
-                } else {
-                    // Clear warning flag when user manually changes channel
-                    clear_warning_stop();
-
-                    // Set config updated flag to skip waiting interval
-                    set_config_updated();
-
-                    // Send success notification
-                    let _ = bilibili::send_danmaku(
-                        &cfg,
-                        &format!(
-                            "更新：{} - {} - {}",
-                            platform,
-                            channel_name.as_deref().unwrap(),
-                            updated_area_name
-                        ),
-                    )
-                    .await;
-                    tracing::info!(
-                        "✅ 更新成功 {} 频道: {} 分区: {} (ID: {} )",
-                        platform,
-                        channel_name.as_deref().unwrap(),
-                        updated_area_name,
-                        updated_area_id
-                    );
-                }
+                    ),
+                )
+                .await;
+                tracing::info!(
+                    "✅ 更新成功 {} 频道: {} 分区: {} (ID: {} )",
+                    platform,
+                    channel_name.as_deref().unwrap(),
+                    updated_area_name,
+                    updated_area_id
+                );
             }
             Err(e) => {
                 tracing::error!("更新配置时出错: {}", e);
@@ -632,6 +686,10 @@ pub fn run_danmaku() {
     std::thread::spawn(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
+            // Set running flag inside the async task to avoid race conditions
+            set_danmaku_running(true);
+            tracing::info!("🚀 启动弹幕客户端");
+
             let cfg = load_config().await.unwrap();
             let room_id = cfg.bililive.room;
 
@@ -649,9 +707,6 @@ pub fn run_danmaku() {
             let cfg_arc = Arc::new(cfg);
             // Use the global DANMAKU_COMMANDS_ENABLED Arc
             let enable_commands = DANMAKU_COMMANDS_ENABLED.clone();
-
-            set_danmaku_running(true);
-            tracing::info!("🚀 启动弹幕客户端");
 
             // Run danmaku client - it will keep running
             if let Err(e) = crate::plugins::danmaku_client::run_native_danmaku_client(
@@ -679,6 +734,33 @@ pub fn enable_danmaku_commands(enabled: bool) {
     } else {
         tracing::info!("⏸️ 弹幕命令已禁用");
     }
+}
+
+/// Stop the danmaku client
+pub fn stop_danmaku() {
+    if !is_danmaku_running() {
+        tracing::warn!("弹幕客户端未在运行");
+        return;
+    }
+
+    tracing::info!("🛑 停止弹幕客户端");
+    set_danmaku_stop_signal(true);
+
+    // Wait for the client to stop gracefully (check status periodically)
+    let mut attempts = 0;
+    while is_danmaku_running() && attempts < 20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        attempts += 1;
+    }
+
+    if is_danmaku_running() {
+        tracing::warn!("弹幕客户端停止超时，但继续执行");
+    } else {
+        tracing::info!("✅ 弹幕客户端已成功停止");
+    }
+
+    // Reset the stop signal for next time
+    set_danmaku_stop_signal(false);
 }
 
 /// Set the warning stop flag and store the channel that was stopped
@@ -769,6 +851,7 @@ pub fn get_area_name(area_id: u64) -> Option<String> {
 }
 
 fn get_area_id(area_name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let area_name_trimmed = area_name.trim();
     let areas_path = std::env::current_exe()
         .map_err(|e| format!("无法获取可执行文件路径: {}", e))?
         .with_file_name("areas.json");
@@ -779,17 +862,21 @@ fn get_area_id(area_name: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let areas: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("无法解析 areas.json: {}", e))?;
 
+    let area_name_lower = area_name_trimmed.to_lowercase();
+
     if let Some(areas_array) = areas["areas"].as_array() {
         for area in areas_array {
             if let (Some(id), Some(name)) = (area["id"].as_u64(), area["name"].as_str()) {
-                if name == area_name {
+                if name.to_lowercase() == area_name_lower {
+                    tracing::debug!("找到分区 '{}' 的ID: {}", area_name_trimmed, id);
                     return Ok(id);
                 }
             }
         }
     }
 
-    Err(format!("未知的分区: {}", area_name).into())
+    tracing::error!("未知的分区: '{}' (已尝试匹配)", area_name_trimmed);
+    Err(format!("未知的分区: {}", area_name_trimmed).into())
 }
 
 pub fn get_aliases(target_name: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {

@@ -13,16 +13,17 @@
   
   // ===== Twitch 配置 =====
   "twitch": {
+    "enable_monitor": true,              // 启用Twitch监控转播
     "channel_name": "",                  // 频道名称 (将出现于转播标题)
     "area_v2": 235,                      // B站分区ID (https://api.live.bilibili.com/room/v1/Area/getList)
     "channel_id": "",                    // Twitch频道ID (https://www.twitch.tv/ 后面的字符串)
-    "oauth_token": "",                   // OAuth令牌 (参考: https://streamlink.github.io/cli/plugins/twitch.html#authentication)
     "proxy_region": "asl",               // 代理区域: na, eu, eu2, eu3, eu4, eu5, as, sa, eul, eu2l, asl, all, perf
     "quality": "best"                    // 画质选择
   },
   
   // ===== YouTube 配置 =====
   "youtube": {
+    "enable_monitor": true,              // 启用YouTube监控转播
     "channel_name": "",                  // 频道名称 (将出现于转播标题)
     "channel_id": "",                    // YouTube频道ID
     "area_v2": 235,                      // B站分区ID (https://api.live.bilibili.com/room/v1/Area/getList)

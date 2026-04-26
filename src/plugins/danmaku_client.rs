@@ -135,6 +135,12 @@ impl BilibiliDanmakuClient {
         let connection_timeout = Duration::from_secs(120); // 2 minutes without any activity
 
         loop {
+            // Check for stop signal
+            if crate::plugins::danmaku::should_stop_danmaku() {
+                info!("🛑 收到停止信号，断开弹幕连接");
+                break;
+            }
+
             tokio::select! {
                 // Handle incoming messages with timeout
                 msg = timeout(Duration::from_secs(60), ws_receiver.next()) => {
@@ -579,12 +585,12 @@ impl BilibiliDanmakuClient {
                                 {
                                     // Non-owners can use commands "%转播" only when enabled
                                     let formatted_message = format!(" :{}", danmaku_text);
+                                    info!("💬 {} : {}", username, danmaku_text);
                                     crate::plugins::danmaku::process_danmaku_with_owner(
                                         &formatted_message,
                                         false, // is_owner = false
                                     )
                                     .await;
-                                    info!("💬 {} : {}", username, danmaku_text);
                                 } else if danmaku_text.contains("%查询") {
                                     let formatted_message = format!(" :{}", danmaku_text);
                                     crate::plugins::danmaku::process_danmaku_with_owner(
@@ -650,9 +656,9 @@ impl BilibiliDanmakuClient {
                     });
                 }
             }
-            "CUT_OFF" | "ANCHOR_ECOLOGY_LIVING_DIALOG" | "FULL_SCREEN_MASK_OPEN" => {
+            "CUT_OFF" | "CUT_OFF_V2" | "ANCHOR_ECOLOGY_LIVING_DIALOG" | "FULL_SCREEN_MASK_OPEN" => {
                 if let Some(data) = &message.data {
-                    let msg = if message.cmd == "CUT_OFF" {
+                    let msg = if message.cmd == "CUT_OFF" || message.cmd == "CUT_OFF_V2" {
                         data["msg"].as_str().unwrap_or("Stream cut off")
                     } else if message.cmd == "ANCHOR_ECOLOGY_LIVING_DIALOG" {
                         data["dialog_title"].as_str().unwrap_or("直播间违规")
@@ -744,6 +750,7 @@ impl BilibiliDanmakuClient {
                 // Room stats update - suppress (too frequent)
             }
             "COMMON_NOTICE_DANMAKU"
+            | "LIVE_ANI_RES_UPDATE"
             | "PK_BATTLE_ENTRANCE"
             | "MESSAGEBOX_USER_MEDAL_CHANGE"
             | "SPREAD_SHOW_FEET"
@@ -778,6 +785,7 @@ impl BilibiliDanmakuClient {
             | "VOICE_JOIN_ROOM_COUNT_INFO"
             | "VOICE_JOIN_LIST"
             | "RANK_CHANGED"
+            | "RANK_CHANGED_V2"
             | "ENTRY_EFFECT" => {}
             "ROOM_CONTENT_AUDIT_REPORT" => {
                 if let Some(data) = &message.data {
@@ -809,11 +817,24 @@ pub async fn run_native_danmaku_client(
     let max_reconnect_attempts = 10;
 
     loop {
+        // Check for stop signal
+        if crate::plugins::danmaku::should_stop_danmaku() {
+            info!("🛑 收到停止信号，退出弹幕客户端");
+            break;
+        }
+
         match client.connect().await {
             Ok(_) => {
                 info!("Danmaku client disconnected normally");
                 reconnect_attempts = 0; // Reset counter on successful connection
-                                        // Don't break immediately - try to reconnect in case it was unexpected
+
+                // Check if this was an intentional stop
+                if crate::plugins::danmaku::should_stop_danmaku() {
+                    info!("🛑 停止信号已确认，退出弹幕客户端");
+                    break;
+                }
+
+                // Otherwise it was unexpected - try to reconnect
                 warn!("Unexpected disconnection, attempting to reconnect...");
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }

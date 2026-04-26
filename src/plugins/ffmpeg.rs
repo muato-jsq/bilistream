@@ -5,6 +5,19 @@ use std::env;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+#[cfg(target_os = "windows")]
+fn configure_no_window(cmd: &mut Command) {
+    #[allow(unused_imports)]
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+}
+
 // Global process supervisor
 lazy_static::lazy_static! {
     static ref FFMPEG_SUPERVISOR: Arc<Mutex<Option<FfmpegProcess>>> = Arc::new(Mutex::new(None));
@@ -16,12 +29,17 @@ lazy_static::lazy_static! {
     static ref LAST_STREAM_TIME: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
     // Track when stream time last changed (Unix timestamp in seconds)
     static ref LAST_STREAM_TIME_UPDATE: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
+    // Track when speed first dropped below 0.98 (Unix timestamp in seconds, 0 = speed is OK)
+    static ref LOW_SPEED_SINCE: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
 }
 
 use std::sync::atomic::AtomicBool;
 
 // Track if ffmpeg was stopped manually (e.g., via restart button)
 static MANUAL_STOP: AtomicBool = AtomicBool::new(false);
+
+// Track if a manual restart was requested (force immediate restart even if stream is live)
+static MANUAL_RESTART: AtomicBool = AtomicBool::new(false);
 
 // Represents a managed ffmpeg process
 pub struct FfmpegProcess {
@@ -160,6 +178,21 @@ pub fn clear_manual_stop() {
     MANUAL_STOP.store(false, Ordering::SeqCst);
 }
 
+// Set manual restart flag (force immediate restart)
+pub fn set_manual_restart() {
+    MANUAL_RESTART.store(true, Ordering::SeqCst);
+}
+
+// Check if manual restart was requested
+pub fn was_manual_restart() -> bool {
+    MANUAL_RESTART.load(Ordering::SeqCst)
+}
+
+// Clear manual restart flag
+pub fn clear_manual_restart() {
+    MANUAL_RESTART.store(false, Ordering::SeqCst);
+}
+
 // Get current ffmpeg speed (lock-free read)
 pub async fn get_ffmpeg_speed() -> Option<f32> {
     let bits = FFMPEG_SPEED.load(Ordering::Relaxed);
@@ -196,6 +229,22 @@ fn update_stream_time(stream_time_secs: u32) {
     }
 }
 
+// Update low-speed tracking: record when speed first drops below 0.98, clear when it recovers
+fn update_speed_tracking(speed: f32) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+    if speed < 0.98 {
+        // Only set the timestamp if not already tracking a low-speed period
+        LOW_SPEED_SINCE
+            .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
+            .ok();
+    } else {
+        LOW_SPEED_SINCE.store(0, Ordering::Relaxed);
+    }
+}
+
 // Check if ffmpeg has made progress recently (within timeout seconds)
 // This checks both: 1) if stats are being reported, 2) if stream time is progressing
 pub async fn is_ffmpeg_stuck(timeout_secs: u64) -> bool {
@@ -226,6 +275,19 @@ pub async fn is_ffmpeg_stuck(timeout_secs: u64) -> bool {
             tracing::warn!(
                 "Stream time frozen for {} seconds, stream likely ended",
                 stream_time_elapsed
+            );
+            return true;
+        }
+    }
+
+    // Check if speed has been below 0.98 for more than 30 seconds
+    let low_speed_since = LOW_SPEED_SINCE.load(Ordering::Relaxed);
+    if low_speed_since > 0 {
+        let low_speed_elapsed = now.saturating_sub(low_speed_since);
+        if low_speed_elapsed > 30 {
+            tracing::warn!(
+                "ffmpeg speed below 0.98 for {} seconds, deemed stuck",
+                low_speed_elapsed
             );
             return true;
         }
@@ -320,6 +382,7 @@ async fn stop_ffmpeg_internal(manual: bool) {
     LAST_PROGRESS_TIME.store(0, Ordering::Relaxed);
     LAST_STREAM_TIME.store(0, Ordering::Relaxed);
     LAST_STREAM_TIME_UPDATE.store(0, Ordering::Relaxed);
+    LOW_SPEED_SINCE.store(0, Ordering::Relaxed);
 }
 /// Parse time string (HH:MM:SS.ms) to seconds
 fn parse_time_to_seconds(time_str: &str) -> Option<u32> {
@@ -379,6 +442,7 @@ pub async fn ffmpeg(
     m3u8_url: String,
     proxy: Option<String>,
     log_level: String,
+    crop: Option<(u32, u32, u32, u32)>, // (width, height, x, y)
 ) {
     // Check if already running
     if is_ffmpeg_running().await {
@@ -392,11 +456,7 @@ pub async fn ffmpeg(
 
     // Hide console window on Windows
     #[cfg(target_os = "windows")]
-    {
-        #[allow(unused_imports)]
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    configure_no_window(&mut cmd);
 
     // Network optimization
     if let Some(proxy) = proxy {
@@ -417,10 +477,25 @@ pub async fn ffmpeg(
         .arg("+genpts+discardcorrupt") // Generate PTS and discard corrupt packets
         // Input file
         .arg("-i")
-        .arg(m3u8_url.trim())
-        // Output options - stream copy
-        .arg("-c")
-        .arg("copy") // Stream copy without re-encoding
+        .arg(m3u8_url.trim());
+
+    // Apply crop filter if configured
+    if let Some((width, height, x, y)) = crop {
+        tracing::info!("🎬 Applying crop filter: {}:{}:{}:{}", width, height, x, y);
+        cmd.arg("-vf")
+            .arg(format!("crop={}:{}:{}:{}", width, height, x, y))
+            .arg("-c:v")
+            .arg("libx264") // Re-encode video when cropping
+            .arg("-preset")
+            .arg("veryfast") // Fast encoding preset
+            .arg("-c:a")
+            .arg("copy"); // Keep audio as-is
+    } else {
+        // Output options - stream copy (no re-encoding)
+        cmd.arg("-c").arg("copy"); // Stream copy without re-encoding
+    }
+
+    cmd
         // .arg("-copyts") // Copy input timestamps
         .arg("-start_at_zero") // Start timestamps at zero
         .arg("-avoid_negative_ts")
@@ -496,6 +571,7 @@ pub async fn ffmpeg(
                                         // Update global speed if available (lock-free atomic write)
                                         if let Some(s) = speed {
                                             FFMPEG_SPEED.store(s.to_bits(), Ordering::Relaxed);
+                                            update_speed_tracking(s);
                                         }
                                         // Update stream time tracking
                                         if let Some(t) = stream_time {
@@ -529,6 +605,7 @@ pub async fn ffmpeg(
                                             // Update global speed if available (lock-free atomic write)
                                             if let Some(s) = speed {
                                                 FFMPEG_SPEED.store(s.to_bits(), Ordering::Relaxed);
+                                                update_speed_tracking(s);
                                             }
                                             // Update stream time tracking
                                             if let Some(t) = stream_time {
@@ -557,8 +634,12 @@ pub async fn ffmpeg(
             let mut supervisor = FFMPEG_SUPERVISOR.lock().await;
             *supervisor = Some(process);
 
-            // Initialize progress time when ffmpeg starts
+            // Reset all tracking state when ffmpeg starts
             update_progress_time();
+            LAST_STREAM_TIME.store(0, Ordering::Relaxed);
+            LAST_STREAM_TIME_UPDATE.store(0, Ordering::Relaxed);
+            FFMPEG_SPEED.store(0, Ordering::Relaxed);
+            LOW_SPEED_SINCE.store(0, Ordering::Relaxed);
 
             // Spawn timeout monitoring task (15 secs timeout)
             tokio::spawn(async {

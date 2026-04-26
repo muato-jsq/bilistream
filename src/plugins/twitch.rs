@@ -10,31 +10,27 @@ use std::process::Command;
 use std::time::Duration;
 
 // Helper function to create a Command with hidden console on Windows
-fn create_hidden_command(program: &str) -> Command {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut command = Command::new(program);
-        // Hide the console window
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        command
-    }
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new(program)
-    }
+#[cfg(target_os = "windows")]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+#[cfg(target_os = "windows")]
+fn configure_no_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
 }
 
 pub struct Twitch {
     pub channel_id: String,
     pub client: ClientWithMiddleware,
-    pub oauth_token: String,
     pub proxy_region: String,
+    pub proxy: Option<String>,
 }
 
 impl Twitch {
-    pub fn new(channel_id: &str, oauth_token: String, proxy_region: String) -> Self {
+    pub fn new(channel_id: &str, proxy_region: String, proxy: Option<String>) -> Self {
         // 设置最大重试次数为5次
         let retry_policy = ExponentialBackoff::builder().build_with_max_retries(5);
         let raw_client = reqwest::Client::builder()
@@ -50,8 +46,8 @@ impl Twitch {
         Twitch {
             channel_id: channel_id.to_string(),
             client,
-            oauth_token,
             proxy_region,
+            proxy,
         }
     }
 
@@ -121,15 +117,21 @@ impl Twitch {
         quality: Option<&str>,
     ) -> Result<String, Box<dyn Error>> {
         let proxy_url = self.get_proxy_url_for_region(proxy_region)?;
-        let quality = quality.unwrap_or("source");
+        let quality = quality.unwrap_or("best");
 
-        let mut cmd = create_hidden_command("streamlink");
+        let mut cmd = Command::new("streamlink");
+        #[cfg(target_os = "windows")]
+        configure_no_window(&mut cmd);
+        // Add HTTP proxy if configured
+        if let Some(ref proxy) = self.proxy {
+            if !proxy.is_empty() {
+                cmd.arg("--http-proxy").arg(proxy);
+            }
+        }
         cmd.arg(proxy_url)
             .arg("--stream-url")
             .arg("--stream-type")
-            .arg("hls")
-            .arg("--twitch-api-header")
-            .arg(format!("Authorization=OAuth {}", self.oauth_token));
+            .arg("hls");
 
         cmd.arg(format!(
             "https://www.twitch.tv/{}",
@@ -152,6 +154,10 @@ impl Twitch {
             Ok(url)
         } else {
             let error = String::from_utf8(output.stderr)?;
+            // Check if the error is a usage message, which indicates missing streamlink-ttvlol plugin
+            if error.contains("usage: streamlink [OPTIONS] <URL> [STREAM]") {
+                return Err("Streamlink plugin (streamlink-ttvlol) 未安装。".into());
+            }
             Err(error.into())
         }
     }

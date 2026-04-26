@@ -1,7 +1,14 @@
+[workspace]
+members = [".", "src-tauri"]
+resolver = "2"
+
 [package]
 name = "bilistream"
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
+
+[features]
+tauri-build = []
 
 [profile.release]
 opt-level = "z"   # Optimize for size (also reduces memory usage)
@@ -45,10 +52,11 @@ byteorder = "1.5"
 flate2 = "1.0"
 anyhow = "1.0"
 # Web UI dependencies
-axum = "0.7"
+axum = "0.8"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 mime_guess = "2.0"
+base64 = "0.22"
 # Windows dependencies
 zip = "0.6"
 # System tray dependencies (platform-specific)
@@ -59,4 +67,13 @@ ksni = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 trayicon = "0.1"
-winapi = { version = "0.3", features = ["winuser", "libloaderapi", "consoleapi", "processenv", "fileapi", "winnt", "winbase"] }
+winapi = { version = "0.3", features = [
+  "winuser",
+  "libloaderapi",
+  "consoleapi",
+  "processenv",
+  "fileapi",
+  "winnt",
+  "winbase",
+] }
+sevenz-rust = "0.6"

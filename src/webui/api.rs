@@ -85,6 +85,7 @@ pub async fn refresh_status_cache_config() {
                     area_name: yt_area_name,
                     topic: Some("-".to_string()),
                     quality: cfg.youtube.quality.clone(),
+                    crop_enabled: cfg.youtube.crop.is_some(),
                 });
             }
         }
@@ -113,6 +114,7 @@ pub async fn refresh_status_cache_config() {
                     area_name: tw_area_name,
                     game: Some("-".to_string()),
                     quality: cfg.twitch.quality.clone(),
+                    crop_enabled: cfg.twitch.crop.is_some(),
                 });
             }
         }
@@ -173,6 +175,7 @@ pub struct YtStatus {
     pub quality: String,
     pub area_id: u64,
     pub area_name: String,
+    pub crop_enabled: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -185,6 +188,7 @@ pub struct TwStatus {
     pub quality: String,
     pub area_id: u64,
     pub area_name: String,
+    pub crop_enabled: bool,
 }
 
 pub async fn get_status() -> impl IntoResponse {
@@ -298,23 +302,28 @@ pub async fn get_config() -> Result<Json<serde_json::Value>, StatusCode> {
         "lol_monitor_interval": cfg.lol_monitor_interval,
         "riot_api_key": cfg.riot_api_key.clone().unwrap_or_default(),
         "holodex_api_key": cfg.holodex_api_key.clone().unwrap_or_default(),
-        "proxy": cfg.proxy.clone(),
         "anti_collision_list": cfg.anti_collision_list.clone(),
         "bilibili": {
             "room": cfg.bililive.room,
             "enable_danmaku_command": cfg.bililive.enable_danmaku_command,
         },
         "youtube": {
+            "enable_monitor": cfg.youtube.enable_monitor,
             "channel_name": cfg.youtube.channel_name,
             "channel_id": cfg.youtube.channel_id,
             "area_v2": cfg.youtube.area_v2,
+            "proxy": cfg.youtube.proxy,
+            "cookies_file": cfg.youtube.cookies_file,
+            "cookies_from_browser": cfg.youtube.cookies_from_browser,
+            "deno_path": cfg.youtube.deno_path,
         },
         "twitch": {
+            "enable_monitor": cfg.twitch.enable_monitor,
             "channel_name": cfg.twitch.channel_name,
             "channel_id": cfg.twitch.channel_id,
             "area_v2": cfg.twitch.area_v2,
-            "oauth_token": cfg.twitch.oauth_token,
             "proxy_region": cfg.twitch.proxy_region,
+            "proxy": cfg.twitch.proxy,
         }
     });
 
@@ -330,10 +339,16 @@ pub struct UpdateConfigRequest {
     lol_monitor_interval: Option<u64>,
     riot_api_key: Option<String>,
     holodex_api_key: Option<String>,
-    proxy: Option<String>,
-    twitch_oauth_token: Option<String>,
     twitch_proxy_region: Option<String>,
+    twitch_proxy: Option<String>,
+    youtube_proxy: Option<String>,
+    youtube_deno_path: Option<String>,
     anti_collision_list: Option<HashMap<String, i32>>,
+    enable_danmaku_command: Option<bool>,
+    youtube_enable_monitor: Option<bool>,
+    twitch_enable_monitor: Option<bool>,
+    youtube_cookies_from_browser: Option<String>,
+    youtube_cookies_file: Option<String>,
 }
 
 pub async fn update_config(
@@ -374,30 +389,56 @@ pub async fn update_config(
             cfg.holodex_api_key = None;
         }
     }
-    if let Some(proxy) = payload.proxy {
-        if !proxy.is_empty() {
-            cfg.proxy = Some(proxy);
-        } else {
-            cfg.proxy = None;
-        }
-    }
-
-    // Check if Twitch settings will be updated (before moving values)
-    let twitch_settings_updated =
-        payload.twitch_oauth_token.is_some() || payload.twitch_proxy_region.is_some();
 
     if let Some(anti_collision_list) = payload.anti_collision_list {
         cfg.anti_collision_list = anti_collision_list;
     }
-    if let Some(twitch_oauth_token) = payload.twitch_oauth_token {
-        if !twitch_oauth_token.is_empty() {
-            cfg.twitch.oauth_token = twitch_oauth_token;
-        } else {
-            cfg.twitch.oauth_token = String::new();
-        }
-    }
     if let Some(twitch_proxy_region) = payload.twitch_proxy_region {
         cfg.twitch.proxy_region = twitch_proxy_region;
+    }
+    if let Some(twitch_proxy) = payload.twitch_proxy {
+        cfg.twitch.proxy = if twitch_proxy.is_empty() {
+            None
+        } else {
+            Some(twitch_proxy)
+        };
+    }
+    if let Some(youtube_proxy) = payload.youtube_proxy {
+        cfg.youtube.proxy = if youtube_proxy.is_empty() {
+            None
+        } else {
+            Some(youtube_proxy)
+        };
+    }
+    if let Some(enable_danmaku_command) = payload.enable_danmaku_command {
+        cfg.bililive.enable_danmaku_command = enable_danmaku_command;
+    }
+    if let Some(youtube_enable_monitor) = payload.youtube_enable_monitor {
+        cfg.youtube.enable_monitor = youtube_enable_monitor;
+    }
+    if let Some(twitch_enable_monitor) = payload.twitch_enable_monitor {
+        cfg.twitch.enable_monitor = twitch_enable_monitor;
+    }
+    if let Some(youtube_cookies_from_browser) = payload.youtube_cookies_from_browser {
+        cfg.youtube.cookies_from_browser = if youtube_cookies_from_browser.is_empty() {
+            None
+        } else {
+            Some(youtube_cookies_from_browser)
+        };
+    }
+    if let Some(youtube_cookies_file) = payload.youtube_cookies_file {
+        cfg.youtube.cookies_file = if youtube_cookies_file.is_empty() {
+            None
+        } else {
+            Some(youtube_cookies_file)
+        };
+    }
+    if let Some(youtube_deno_path) = payload.youtube_deno_path {
+        cfg.youtube.deno_path = if youtube_deno_path.is_empty() {
+            None
+        } else {
+            Some(youtube_deno_path)
+        };
     }
 
     // Save config
@@ -408,15 +449,10 @@ pub async fn update_config(
     // Set config updated flag so main loop can detect the change
     set_config_updated();
 
-    // Refresh status cache with updated configuration (for Twitch settings)
-    refresh_status_cache_config().await;
-
-    // Refresh Twitch live status in background if Twitch settings were updated
-    if twitch_settings_updated {
-        tokio::spawn(async {
-            let _ = refresh_twitch_status().await;
-        });
-    }
+    // Spawn status cache refresh in background (lightweight operation)
+    tokio::spawn(async {
+        refresh_status_cache_config().await;
+    });
 
     Ok(ApiResponse {
         success: true,
@@ -432,7 +468,7 @@ pub struct StartStreamRequest {
 
 pub async fn start_stream(
     Json(payload): Json<StartStreamRequest>,
-) -> Result<ApiResponse<()>, StatusCode> {
+) -> Result<ApiResponse<serde_json::Value>, StatusCode> {
     let mut cfg = load_config()
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -443,15 +479,35 @@ pub async fn start_stream(
         _ => 235,
     };
 
-    bili_start_live(&mut cfg, area_v2)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(ApiResponse {
-        success: true,
-        data: None,
-        message: Some("直播已开始".to_string()),
-    })
+    match bili_start_live(&mut cfg, area_v2).await {
+        Ok(_) => Ok(ApiResponse {
+            success: true,
+            data: Some(json!({})),
+            message: Some("直播已开始".to_string()),
+        }),
+        Err(e) => {
+            let error_msg = e.to_string();
+            // Check if it's a face verification error
+            if error_msg.starts_with("FACE_AUTH_REQUIRED:") {
+                let qr_url = error_msg.strip_prefix("FACE_AUTH_REQUIRED:").unwrap_or("");
+                Ok(ApiResponse {
+                    success: false,
+                    data: Some(json!({
+                        "requires_face_auth": true,
+                        "qr_url": qr_url
+                    })),
+                    message: Some("需要人脸验证，请扫描二维码完成验证后重试".to_string()),
+                })
+            } else {
+                // Return proper JSON error response instead of HTTP error
+                Ok(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(error_msg),
+                })
+            }
+        }
+    }
 }
 
 pub async fn stop_stream() -> Result<ApiResponse<()>, StatusCode> {
@@ -476,6 +532,9 @@ pub async fn restart_stream() -> Result<ApiResponse<()>, StatusCode> {
 
     // Clear any warning stops to allow restreaming
     crate::plugins::danmaku::clear_warning_stop();
+
+    // Set manual restart flag to force immediate restart
+    crate::plugins::set_manual_restart();
 
     // Set config updated flag to trigger main loop reload
     set_config_updated();
@@ -597,6 +656,8 @@ pub struct UpdateChannelRequest {
     area_id: Option<u64>,
     quality: Option<String>,
     riot_api_key: Option<String>,
+    cookies_file: Option<String>,
+    cookies_from_browser: Option<String>,
 }
 
 pub async fn update_channel(
@@ -627,6 +688,20 @@ pub async fn update_channel(
             }
             if let Some(quality) = payload.quality {
                 cfg.youtube.quality = quality;
+            }
+            if let Some(cookies_file) = payload.cookies_file {
+                cfg.youtube.cookies_file = if cookies_file.is_empty() {
+                    None
+                } else {
+                    Some(cookies_file)
+                };
+            }
+            if let Some(cookies_from_browser) = payload.cookies_from_browser {
+                cfg.youtube.cookies_from_browser = if cookies_from_browser.is_empty() {
+                    None
+                } else {
+                    Some(cookies_from_browser)
+                };
             }
         }
         "twitch" => {
@@ -715,6 +790,141 @@ pub async fn get_areas() -> Result<Json<serde_json::Value>, StatusCode> {
 }
 
 #[derive(Serialize)]
+pub struct BannedKeywordsResponse {
+    danmaku_banned_keywords: Vec<String>,
+    streaming_banned_keywords: Vec<String>,
+}
+
+pub async fn get_banned_keywords() -> Result<Json<BannedKeywordsResponse>, StatusCode> {
+    let areas_path = std::env::current_exe()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .with_file_name("areas.json");
+
+    let content =
+        std::fs::read_to_string(areas_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let data: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let danmaku_banned = data["banned_keywords"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let streaming_banned = data["streaming_banned_keywords"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(BannedKeywordsResponse {
+        danmaku_banned_keywords: danmaku_banned,
+        streaming_banned_keywords: streaming_banned,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateBannedKeywordsRequest {
+    danmaku_banned_keywords: Option<Vec<String>>,
+    streaming_banned_keywords: Option<Vec<String>>,
+}
+
+pub async fn update_banned_keywords(
+    Json(payload): Json<UpdateBannedKeywordsRequest>,
+) -> Result<ApiResponse<()>, StatusCode> {
+    let areas_path = std::env::current_exe()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .with_file_name("areas.json");
+
+    let content =
+        std::fs::read_to_string(&areas_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut data: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(danmaku_keywords) = payload.danmaku_banned_keywords {
+        data["banned_keywords"] = serde_json::json!(danmaku_keywords);
+    }
+
+    if let Some(streaming_keywords) = payload.streaming_banned_keywords {
+        data["streaming_banned_keywords"] = serde_json::json!(streaming_keywords);
+    }
+
+    let updated_content =
+        serde_json::to_string_pretty(&data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    std::fs::write(&areas_path, updated_content).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(ApiResponse {
+        success: true,
+        data: None,
+        message: Some("禁用关键词已更新".to_string()),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ToggleMonitorRequest {
+    enabled: bool,
+}
+
+pub async fn toggle_youtube_monitor(
+    Json(payload): Json<ToggleMonitorRequest>,
+) -> Result<ApiResponse<()>, StatusCode> {
+    let mut cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    cfg.youtube.enable_monitor = payload.enabled;
+
+    crate::config::save_config(&cfg)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    set_config_updated();
+
+    Ok(ApiResponse {
+        success: true,
+        data: None,
+        message: Some(format!(
+            "YouTube监控已{}",
+            if payload.enabled { "启用" } else { "禁用" }
+        )),
+    })
+}
+
+pub async fn toggle_twitch_monitor(
+    Json(payload): Json<ToggleMonitorRequest>,
+) -> Result<ApiResponse<()>, StatusCode> {
+    let mut cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    cfg.twitch.enable_monitor = payload.enabled;
+
+    crate::config::save_config(&cfg)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    set_config_updated();
+
+    Ok(ApiResponse {
+        success: true,
+        data: None,
+        message: Some(format!(
+            "Twitch监控已{}",
+            if payload.enabled { "启用" } else { "禁用" }
+        )),
+    })
+}
+
+#[derive(Serialize)]
 pub struct SetupStatus {
     needs_setup: bool,
     missing_files: Vec<String>,
@@ -773,7 +983,6 @@ pub async fn get_logs_endpoint() -> Result<Json<LogsResponse>, StatusCode> {
 #[derive(Deserialize)]
 pub struct SetupConfigRequest {
     room: i32,
-    proxy: Option<String>,
     auto_cover: bool,
     enable_danmaku_command: bool,
     interval: u64,
@@ -782,12 +991,13 @@ pub struct SetupConfigRequest {
     youtube_channel_id: Option<String>,
     youtube_area_v2: Option<u64>,
     youtube_quality: Option<String>,
+    youtube_proxy: Option<String>,
     twitch_channel_name: Option<String>,
     twitch_channel_id: Option<String>,
     twitch_area_v2: Option<u64>,
-    twitch_oauth_token: Option<String>,
     twitch_proxy_region: Option<String>,
     twitch_quality: Option<String>,
+    twitch_proxy: Option<String>,
     holodex_api_key: Option<String>,
     riot_api_key: Option<String>,
     enable_lol_monitor: bool,
@@ -813,20 +1023,27 @@ pub async fn save_setup_config(
                 credentials: crate::config::Credentials::default(),
             },
             twitch: crate::config::Twitch {
+                enable_monitor: true,
                 channel_name: String::new(),
                 area_v2: 235,
                 channel_id: String::new(),
-                oauth_token: String::new(),
                 proxy_region: "as".to_string(),
                 quality: "best".to_string(),
+                proxy: None,
+                crop: None,
             },
             youtube: crate::config::Youtube {
+                enable_monitor: true,
                 channel_name: String::new(),
                 channel_id: String::new(),
                 area_v2: 235,
                 quality: "best".to_string(),
+                cookies_file: None,
+                cookies_from_browser: None,
+                proxy: None,
+                deno_path: None,
+                crop: None,
             },
-            proxy: None,
             holodex_api_key: None,
             riot_api_key: None,
             enable_lol_monitor: false,
@@ -841,7 +1058,6 @@ pub async fn save_setup_config(
     cfg.interval = payload.interval;
     cfg.bililive.enable_danmaku_command = payload.enable_danmaku_command;
     cfg.bililive.room = payload.room;
-    cfg.proxy = payload.proxy;
     cfg.holodex_api_key = payload.holodex_api_key;
     cfg.riot_api_key = payload.riot_api_key;
     cfg.enable_lol_monitor = payload.enable_lol_monitor;
@@ -850,14 +1066,15 @@ pub async fn save_setup_config(
     let youtube_updated = payload.youtube_channel_name.is_some()
         || payload.youtube_channel_id.is_some()
         || payload.youtube_area_v2.is_some()
-        || payload.youtube_quality.is_some();
+        || payload.youtube_quality.is_some()
+        || payload.youtube_proxy.is_some();
 
     let twitch_updated = payload.twitch_channel_name.is_some()
         || payload.twitch_channel_id.is_some()
         || payload.twitch_area_v2.is_some()
-        || payload.twitch_oauth_token.is_some()
         || payload.twitch_proxy_region.is_some()
-        || payload.twitch_quality.is_some();
+        || payload.twitch_quality.is_some()
+        || payload.twitch_proxy.is_some();
 
     // Update YouTube config if provided
     if let Some(yt_name) = payload.youtube_channel_name {
@@ -872,6 +1089,13 @@ pub async fn save_setup_config(
     if let Some(yt_quality) = payload.youtube_quality {
         cfg.youtube.quality = yt_quality;
     }
+    if let Some(yt_proxy) = payload.youtube_proxy {
+        cfg.youtube.proxy = if yt_proxy.is_empty() {
+            None
+        } else {
+            Some(yt_proxy)
+        };
+    }
 
     // Update Twitch config if provided
     if let Some(tw_name) = payload.twitch_channel_name {
@@ -883,14 +1107,18 @@ pub async fn save_setup_config(
     if let Some(tw_area) = payload.twitch_area_v2 {
         cfg.twitch.area_v2 = tw_area;
     }
-    if let Some(tw_oauth) = payload.twitch_oauth_token {
-        cfg.twitch.oauth_token = tw_oauth;
-    }
     if let Some(tw_region) = payload.twitch_proxy_region {
         cfg.twitch.proxy_region = tw_region;
     }
     if let Some(tw_quality) = payload.twitch_quality {
         cfg.twitch.quality = tw_quality;
+    }
+    if let Some(tw_proxy) = payload.twitch_proxy {
+        cfg.twitch.proxy = if tw_proxy.is_empty() {
+            None
+        } else {
+            Some(tw_proxy)
+        };
     }
 
     // Save config
@@ -1187,6 +1415,7 @@ rm "$0"
 #[derive(Serialize)]
 pub struct VersionInfo {
     version: String,
+    is_tauri: bool,
 }
 
 pub async fn get_version() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode> {
@@ -1194,6 +1423,7 @@ pub async fn get_version() -> Result<Json<ApiResponse<VersionInfo>>, StatusCode>
         success: true,
         data: Some(VersionInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            is_tauri: cfg!(feature = "tauri-build"),
         }),
         message: None,
     }))
@@ -1571,7 +1801,8 @@ pub async fn switch_to_holodex_stream(
     let is_live = payload
         .status
         .as_ref()
-        .map(|s| s == "live")
+        .filter(|s| !s.is_empty()) // Filter out empty strings
+        .map(|s| s.to_lowercase() == "live")
         .unwrap_or(false);
     let stream_title = payload.title.unwrap_or_else(|| "未知标题".to_string());
     let stream_topic = payload.topic_id.unwrap_or_else(|| "未知".to_string());
@@ -1591,6 +1822,7 @@ pub async fn switch_to_holodex_stream(
         quality: cfg.youtube.quality.clone(),
         area_id: cfg.youtube.area_v2,
         area_name: yt_area_name,
+        crop_enabled: cfg.youtube.crop.is_some(),
     });
 
     update_status_cache(current_cache);
@@ -1702,6 +1934,7 @@ pub async fn refresh_youtube_status() -> Json<ApiResponse<()>> {
         area_id: cfg.youtube.area_v2,
         area_name: crate::plugins::get_area_name(cfg.youtube.area_v2)
             .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.youtube.area_v2)),
+        crop_enabled: cfg.youtube.crop.is_some(),
     });
 
     update_status_cache(current_cache);
@@ -1774,6 +2007,7 @@ pub async fn refresh_twitch_status() -> Json<ApiResponse<()>> {
         area_id: cfg.twitch.area_v2,
         area_name: crate::plugins::get_area_name(cfg.twitch.area_v2)
             .unwrap_or_else(|| format!("未知分区 (ID: {})", cfg.twitch.area_v2)),
+        crop_enabled: cfg.twitch.crop.is_some(),
     });
 
     update_status_cache(current_cache);
@@ -2092,6 +2326,64 @@ pub async fn update_channel_manage(
         })
     }
 }
+// Update existing area
+pub async fn update_area_manage(Json(payload): Json<AddAreaRequest>) -> Json<ApiResponse<()>> {
+    // Read current areas
+    let mut areas_data = match std::fs::read_to_string("areas.json") {
+        Ok(data) => match serde_json::from_str::<AreasData>(&data) {
+            Ok(areas) => areas,
+            Err(e) => {
+                return Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to parse areas.json: {}", e)),
+                });
+            }
+        },
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read areas.json: {}", e)),
+            });
+        }
+    };
+
+    // Find and update the area
+    if let Some(area) = areas_data.areas.iter_mut().find(|a| a.id == payload.id) {
+        area.name = payload.name;
+        area.title_keywords = payload.title_keywords;
+        area.aliases = payload.aliases;
+
+        // Write back to file
+        match serde_json::to_string_pretty(&areas_data) {
+            Ok(json_str) => match std::fs::write("areas.json", json_str) {
+                Ok(_) => Json(ApiResponse {
+                    success: true,
+                    data: Some(()),
+                    message: Some("Area updated successfully".to_string()),
+                }),
+                Err(e) => Json(ApiResponse {
+                    success: false,
+                    data: None,
+                    message: Some(format!("Failed to write areas.json: {}", e)),
+                }),
+            },
+            Err(e) => Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to serialize areas data: {}", e)),
+            }),
+        }
+    } else {
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("Area with ID {} not found", payload.id)),
+        })
+    }
+}
+
 // Delete area by ID
 pub async fn delete_area(
     axum::extract::Path(id): axum::extract::Path<u32>,
@@ -2210,4 +2502,376 @@ pub async fn delete_channel(
             message: Some(format!("Failed to serialize channels data: {}", e)),
         }),
     }
+}
+
+// Capture frame from stream for crop selection
+#[derive(Deserialize)]
+pub struct CaptureFrameRequest {
+    pub platform: String, // "youtube" or "twitch"
+}
+
+pub async fn capture_frame(
+    axum::extract::Path(platform): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<ApiResponse<()>> {
+    let cfg = match load_config().await {
+        Ok(c) => c,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to load config: {}", e)),
+            });
+        }
+    };
+
+    // Get m3u8 URL based on platform
+    let m3u8_url: String;
+    let proxy: Option<String>;
+
+    match platform.as_str() {
+        "youtube" => {
+            // Use channel_id from query params if provided, otherwise use config
+            let channel_id = params
+                .get("channel_id")
+                .map(|s| s.as_str())
+                .unwrap_or(&cfg.youtube.channel_id);
+
+            // Use yt-dlp to get m3u8 URL with specific quality
+            let channel_url = format!("https://www.youtube.com/channel/{}/live", channel_id);
+
+            // Get yt-dlp command (handles Windows .exe)
+            let yt_dlp_cmd = if cfg!(target_os = "windows") {
+                if let Ok(exe_path) = std::env::current_exe() {
+                    if let Some(exe_dir) = exe_path.parent() {
+                        let local_yt_dlp = exe_dir.join("yt-dlp.exe");
+                        if local_yt_dlp.exists() {
+                            local_yt_dlp.to_string_lossy().to_string()
+                        } else {
+                            "yt-dlp".to_string()
+                        }
+                    } else {
+                        "yt-dlp".to_string()
+                    }
+                } else {
+                    "yt-dlp".to_string()
+                }
+            } else {
+                "yt-dlp".to_string()
+            };
+
+            let mut cmd = tokio::process::Command::new(yt_dlp_cmd);
+            // Use -f to specify quality format, then -g to get URL
+            cmd.arg("-f")
+                .arg(&cfg.youtube.quality)
+                .arg("-g")
+                .arg(&channel_url);
+
+            if let Some(ref proxy_url) = cfg.youtube.proxy {
+                cmd.arg("--proxy").arg(proxy_url);
+            }
+
+            match cmd.output().await {
+                Ok(output) if output.status.success() => {
+                    m3u8_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if m3u8_url.is_empty() {
+                        return Json(ApiResponse {
+                            success: false,
+                            data: None,
+                            message: Some(
+                                "YouTube stream is not live or URL not found".to_string(),
+                            ),
+                        });
+                    }
+                    proxy = cfg.youtube.proxy.clone();
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("yt-dlp failed: {}", stderr);
+
+                    // Check if it's a "not live" error
+                    let message = if stderr.contains("will begin in")
+                        || stderr.contains("not live")
+                        || stderr.contains("Premieres in")
+                    {
+                        "该频道未在直播".to_string()
+                    } else {
+                        format!(
+                            "获取直播流失败: {}",
+                            stderr.lines().next().unwrap_or("未知错误")
+                        )
+                    };
+
+                    return Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        message: Some(message),
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Failed to execute yt-dlp: {}", e);
+                    return Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        message: Some(format!(
+                            "Failed to execute yt-dlp: {}. Make sure yt-dlp is installed and in PATH.",
+                            e
+                        )),
+                    });
+                }
+            }
+        }
+        "twitch" => {
+            // Use streamlink with proxy URL like in twitch.rs
+            let proxy_region = &cfg.twitch.proxy_region;
+            let proxy_url = match proxy_region.as_str() {
+                "na" => "--twitch-proxy-playlist=https://lb-na.cdn-perfprod.com",
+                "eu" => "--twitch-proxy-playlist=https://lb-eu.cdn-perfprod.com",
+                "eu2" => "--twitch-proxy-playlist=https://lb-eu2.cdn-perfprod.com",
+                "eu3" => "--twitch-proxy-playlist=https://lb-eu3.cdn-perfprod.com",
+                "eu4" => "--twitch-proxy-playlist=https://lb-eu4.cdn-perfprod.com",
+                "eu5" => "--twitch-proxy-playlist=https://lb-eu5.cdn-perfprod.com",
+                "as" => "--twitch-proxy-playlist=https://lb-as.cdn-perfprod.com",
+                "sa" => "--twitch-proxy-playlist=https://lb-sa.cdn-perfprod.com",
+                "eul" => "--twitch-proxy-playlist=https://eu.luminous.dev",
+                "eu2l" => "--twitch-proxy-playlist=https://eu2.luminous.dev",
+                "asl" => "--twitch-proxy-playlist=https://as.luminous.dev",
+                "" => "",
+                _ => "asl", // Default to asl if invalid
+            };
+
+            let channel_url = format!("https://twitch.tv/{}", cfg.twitch.channel_id);
+
+            let mut cmd = tokio::process::Command::new("streamlink");
+
+            // Add proxy URL if not empty
+            if !proxy_url.is_empty() {
+                cmd.arg(proxy_url);
+            }
+
+            // Use configured quality instead of "best"
+            cmd.arg("--stream-url")
+                .arg(&channel_url)
+                .arg(&cfg.twitch.quality);
+
+            if let Some(ref http_proxy) = cfg.twitch.proxy {
+                cmd.arg("--http-proxy").arg(http_proxy);
+            }
+
+            match cmd.output().await {
+                Ok(output) if output.status.success() => {
+                    m3u8_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if m3u8_url.is_empty() {
+                        return Json(ApiResponse {
+                            success: false,
+                            data: None,
+                            message: Some("Twitch stream is not live or URL not found".to_string()),
+                        });
+                    }
+                    proxy = cfg.twitch.proxy.clone();
+                }
+                _ => {
+                    return Json(ApiResponse {
+                        success: false,
+                        data: None,
+                        message: Some(
+                            "Failed to get Twitch stream URL. Make sure streamlink and streamlink-ttvlol plugin are installed."
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+        }
+        _ => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("Invalid platform".to_string()),
+            });
+        }
+    }
+
+    // Capture frame using ffmpeg
+    let output_path = match std::env::current_exe() {
+        Ok(path) => path.with_file_name("pic_for_crop.jpg"),
+        Err(_) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("Failed to get executable path".to_string()),
+            });
+        }
+    };
+
+    // Get ffmpeg command (handles Windows .exe)
+    let ffmpeg_cmd = if cfg!(target_os = "windows") {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let local_ffmpeg = exe_dir.join("ffmpeg.exe");
+                if local_ffmpeg.exists() {
+                    local_ffmpeg.to_string_lossy().to_string()
+                } else {
+                    "ffmpeg".to_string()
+                }
+            } else {
+                "ffmpeg".to_string()
+            }
+        } else {
+            "ffmpeg".to_string()
+        }
+    } else {
+        "ffmpeg".to_string()
+    };
+
+    let mut cmd = tokio::process::Command::new(ffmpeg_cmd);
+    cmd.arg("-y")
+        .arg("-live_start_index")
+        .arg("-1")
+        .arg("-i")
+        .arg(&m3u8_url)
+        .arg("-vframes")
+        .arg("1")
+        .arg(&output_path);
+
+    if let Some(proxy_url) = proxy {
+        cmd.arg("-http_proxy").arg(proxy_url);
+    }
+
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to execute ffmpeg: {}", e)),
+            });
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Json(ApiResponse {
+            success: false,
+            data: None,
+            message: Some(format!("FFmpeg failed: {}", stderr)),
+        });
+    }
+
+    // Read the image and convert to base64
+    let image_data = match tokio::fs::read(&output_path).await {
+        Ok(data) => data,
+        Err(e) => {
+            return Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some(format!("Failed to read captured image: {}", e)),
+            });
+        }
+    };
+
+    let base64_image =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
+
+    // Return base64 image in message field since data field must be ()
+    Json(ApiResponse {
+        success: true,
+        data: Some(()),
+        message: Some(format!("data:image/jpeg;base64,{}", base64_image)),
+    })
+}
+
+// Update crop configuration
+#[derive(Deserialize)]
+pub struct UpdateCropRequest {
+    pub platform: String, // "youtube" or "twitch"
+    pub enabled: bool,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub x: Option<u32>,
+    pub y: Option<u32>,
+}
+
+pub async fn update_crop(
+    Json(payload): Json<UpdateCropRequest>,
+) -> Result<ApiResponse<()>, StatusCode> {
+    let mut cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let crop_config = if payload.enabled {
+        if payload.width.is_none()
+            || payload.height.is_none()
+            || payload.x.is_none()
+            || payload.y.is_none()
+        {
+            return Ok(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("Crop dimensions required when enabled".to_string()),
+            });
+        }
+        Some(crate::config::CropConfig {
+            width: payload.width.unwrap(),
+            height: payload.height.unwrap(),
+            x: payload.x.unwrap(),
+            y: payload.y.unwrap(),
+        })
+    } else {
+        None
+    };
+
+    match payload.platform.as_str() {
+        "youtube" => {
+            cfg.youtube.crop = crop_config;
+        }
+        "twitch" => {
+            cfg.twitch.crop = crop_config;
+        }
+        _ => {
+            return Ok(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("Invalid platform".to_string()),
+            });
+        }
+    }
+
+    crate::config::save_config(&cfg)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    set_config_updated();
+
+    Ok(ApiResponse {
+        success: true,
+        data: None,
+        message: Some("Crop configuration updated".to_string()),
+    })
+}
+
+// Get current crop configuration
+pub async fn get_crop(
+    platform: String,
+) -> Result<Json<ApiResponse<Option<crate::config::CropConfig>>>, StatusCode> {
+    let cfg = load_config()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let crop = match platform.as_str() {
+        "youtube" => cfg.youtube.crop,
+        "twitch" => cfg.twitch.crop,
+        _ => {
+            return Ok(Json(ApiResponse {
+                success: false,
+                data: None,
+                message: Some("Invalid platform".to_string()),
+            }));
+        }
+    };
+
+    Ok(Json(ApiResponse {
+        success: true,
+        data: Some(crop),
+        message: None,
+    }))
 }

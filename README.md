@@ -11,7 +11,7 @@
 
 ## Download
 
-**Latest Release: v0.4.4**
+**Latest Release: v0.5.0**
 
 Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
 
@@ -19,7 +19,8 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
 
 1. **Windows:** Double-click `bilistream.exe` - Runs in background, browser opens webui automatically!
 2. **Linux/Mac:** Run `./bilistream` in terminal
-3. **Auto-download:** Required files download automatically on first run:
+3. **Desktop App (optional):** Use `bilistream-tauri` for a native window with system tray — browser access still works at `http://localhost:3150`
+4. **Auto-download:** Required files download automatically on first run:
    - `webui/dist/index.html` - Web interface
    - `areas.json` - Bilibili categories and banned keywords
    - `channels.json` - Preset channel list
@@ -59,7 +60,7 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
   - ffmpeg.exe
   - yt-dlp.exe
 - **For Twitch support** (optional):
-  - Install streamlink: [Download](https://github.com/streamlink/windows-builds/releases) or `pip install streamlink`
+  - Install streamlink:  `pip install streamlink`
   - Install ttvlol plugin: [streamlink-ttvlol](https://github.com/2bc4/streamlink-ttvlol)
 
 **Linux/Mac:**
@@ -127,7 +128,6 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
    - API keys (Holodex, Riot Games - optional)
    - Anti-collision monitoring (optional)
    - Stream quality settings (for network-limited users)
-
 6. **Stream Quality Configuration:**
 
    For users with limited network bandwidth, you can configure stream quality settings:
@@ -136,14 +136,14 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
 
    - `best` - Best available quality (recommended)
    - `best[height<=1080]` - Best quality up to 1080p
-   - `best[height<=720]` - Best quality up to 720p  
+   - `best[height<=720]` - Best quality up to 720p
    - `best[height<=480]` - Best quality up to 480p
    - `best[height<=360]` - Best quality up to 360p
    - `worst` - Lowest available quality
 
    **Twitch (streamlink) Quality Options:**
 
-   - `source` - Original broadcaster quality
+   - `best` - Original broadcaster quality
    - `high` - High quality (≤720p30fps, filters out higher resolutions)
    - `medium` - Medium quality (≤540p30fps, filters out higher resolutions)
    - `low` - Low quality (≤360p30fps, filters out higher resolutions)
@@ -209,6 +209,7 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
 ./bilistream tray               # Force background mode (with system tray)
 ./bilistream webui              # Force web mode (shows console logs)
 ./bilistream cli                # Command-line only (no web interface)
+./bilistream-tauri              # Desktop app mode (native window + tray)
 ```
 
 **First run:**
@@ -263,8 +264,8 @@ Download from [GitHub Releases](https://github.com/Detteee/bilistream/releases)
 ./bilistream completion <shell>                 # Generate completions (bash/zsh/fish)
 
 # Custom ports
-./bilistream webui --port 8080                  # Web UI with custom port
-./bilistream tray --port 8080                   # Tray mode with custom port
+./bilistream webui --port <custom port>                  # Web UI with custom port
+./bilistream tray --port <custom port>                   # Tray mode with custom port
 ```
 
 ### Danmaku Command Feature
@@ -273,7 +274,7 @@ Danmaku command format:
 
 ```txt
 %转播%YT/TW%channel_name%area_name
-channel_name must in YT/TW_channels.txt
+channel_name must in channels.json
 ```
 
 Example:

@@ -50,13 +50,31 @@ pub async fn start_webui(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .route("/holodex/switch", post(api::switch_to_holodex_stream))
         .route("/refresh/youtube", get(api::refresh_youtube_status))
         .route("/refresh/twitch", get(api::refresh_twitch_status))
+        .route("/banned-keywords", get(api::get_banned_keywords))
+        .route("/banned-keywords", post(api::update_banned_keywords))
+        .route("/toggle-youtube-monitor", post(api::toggle_youtube_monitor))
+        .route("/toggle-twitch-monitor", post(api::toggle_twitch_monitor))
         .route("/manage/areas", get(api::get_areas_manage))
         .route("/manage/areas", post(api::add_area))
-        .route("/manage/areas/:id", delete(api::delete_area))
+        .route("/manage/areas", put(api::update_area_manage))
+        .route("/manage/areas/{id}", delete(api::delete_area))
         .route("/manage/channels", get(api::get_channels_manage))
         .route("/manage/channels", post(api::add_channel))
         .route("/manage/channels", put(api::update_channel_manage))
-        .route("/manage/channels/:name", delete(api::delete_channel));
+        .route("/manage/channels/{name}", delete(api::delete_channel))
+        .route("/crop/capture/{platform}", post(api::capture_frame))
+        .route("/crop/update", post(api::update_crop))
+        .route(
+            "/crop/{platform}",
+            get(
+                |axum::extract::Path(platform): axum::extract::Path<String>| async move {
+                    match api::get_crop(platform).await {
+                        Ok(response) => response.into_response(),
+                        Err(status) => status.into_response(),
+                    }
+                },
+            ),
+        );
 
     // Main app with API routes and static files
     let app = Router::new()
