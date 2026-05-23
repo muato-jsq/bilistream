@@ -126,10 +126,10 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
         // Log outer loop restart for debugging channel switch issues
         tracing::debug!("🔄 外层循环开始 - 重新加载配置并检查频道状态");
 
-        let mut cfg = load_config().await?;
-
-        // clear config updated
+        // Consume the previous reload signal before loading; updates that arrive during
+        // load_config() remain set and will be picked up by the checks below.
         clear_config_updated();
+        let mut cfg = load_config().await?;
 
         // Handle danmaku client based on enable_danmaku_command setting
         if cfg.bililive.enable_danmaku_command {
@@ -152,6 +152,12 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             tracing::info!("💡 提示: 访问 WebUI 进行配置，或参考 config.json.example");
             // Sleep and continue to allow WebUI configuration
             tokio::time::sleep(Duration::from_secs(cfg.interval)).await;
+            continue 'outer;
+        }
+
+        if is_config_updated() {
+            clear_config_updated();
+            tracing::info!("🔄 检测到配置更新，重新加载配置并检查频道状态");
             continue 'outer;
         }
 
@@ -188,6 +194,12 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
                 (None, false, None, None, None, None, None)
             };
 
+        if is_config_updated() {
+            clear_config_updated();
+            tracing::info!("🔄 YouTube状态检查期间检测到配置更新，重新加载配置并检查频道状态");
+            continue 'outer;
+        }
+
         // Check Twitch status (only if enabled)
         let (tw_live, mut tw_is_live, tw_area, tw_title, tw_m3u8_url, tw_stream_id) =
             if cfg.twitch.enable_monitor && !cfg.twitch.channel_id.is_empty() {
@@ -211,6 +223,12 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             } else {
                 (None, false, None, None, None, None)
             };
+
+        if is_config_updated() {
+            clear_config_updated();
+            tracing::info!("🔄 Twitch状态检查期间检测到配置更新，重新加载配置并检查频道状态");
+            continue 'outer;
+        }
 
         // Get Bilibili status
         let (bili_is_live, bili_title, bili_area_id) =
@@ -350,13 +368,110 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
                 continue 'outer;
             }
 
+            let streaming_banned_keywords = load_streaming_banned_keywords();
+
+            if yt_is_live {
+                let yt_stream_title = match (&yt_area, &yt_title) {
+                    (Some(area), Some(title)) => Some(format!("{} {}", area, title)),
+                    _ => yt_title.clone(),
+                };
+                let default_title = "无标题".to_string();
+                let title_str = yt_stream_title.as_ref().unwrap_or(&default_title);
+
+                if let Some(keyword) = streaming_banned_keywords.iter().find(|k| {
+                    yt_stream_title
+                        .as_ref()
+                        .map_or(false, |t| t.contains(k.as_str()))
+                }) {
+                    let should_warn = {
+                        let mut last_warning = LAST_BANNED_KEYWORD_WARNING.lock().unwrap();
+                        let current_warning = format!("YT:{}:{}", keyword, title_str);
+                        if last_warning.as_ref() != Some(&current_warning) {
+                            *last_warning = Some(current_warning);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_warn {
+                        tracing::error!("YT直播标题/分区包含不支持的关键词: {}", keyword);
+                        if let Err(e) =
+                            send_danmaku(&cfg, &format!("错误：YT标题/分区含:{}", keyword)).await
+                        {
+                            tracing::error!("Failed to send danmaku: {}", e);
+                        }
+                        if cfg.bililive.enable_danmaku_command {
+                            if !is_danmaku_commands_enabled() {
+                                enable_danmaku_commands(true);
+                            }
+                            thread::sleep(Duration::from_secs(2));
+                            if let Err(e) = send_danmaku(&cfg, "可使用弹幕指令进行换台").await
+                            {
+                                tracing::error!("Failed to send danmaku: {}", e);
+                            }
+                        }
+                    }
+
+                    yt_is_live = false;
+                }
+            }
+
+            if tw_is_live {
+                let tw_stream_title = match (&tw_area, &tw_title) {
+                    (Some(area), Some(title)) => Some(format!("{} {}", area, title)),
+                    _ => tw_title.clone(),
+                };
+                let default_title = "无标题".to_string();
+                let title_str = tw_stream_title.as_ref().unwrap_or(&default_title);
+
+                if let Some(keyword) = streaming_banned_keywords.iter().find(|k| {
+                    tw_stream_title
+                        .as_ref()
+                        .map_or(false, |t| t.contains(k.as_str()))
+                }) {
+                    let should_warn = {
+                        let mut last_warning = LAST_BANNED_KEYWORD_WARNING.lock().unwrap();
+                        let current_warning = format!("TW:{}:{}", keyword, title_str);
+                        if last_warning.as_ref() != Some(&current_warning) {
+                            *last_warning = Some(current_warning);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_warn {
+                        tracing::error!("TW直播标题/分区包含不支持的关键词: {}", keyword);
+                        if let Err(e) =
+                            send_danmaku(&cfg, &format!("错误：TW标题/分区含:{}", keyword)).await
+                        {
+                            tracing::error!("Failed to send danmaku: {}", e);
+                        }
+                        if cfg.bililive.enable_danmaku_command {
+                            if !is_danmaku_commands_enabled() {
+                                enable_danmaku_commands(true);
+                            }
+                            thread::sleep(Duration::from_secs(2));
+                            if let Err(e) = send_danmaku(&cfg, "可使用弹幕指令进行换台").await
+                            {
+                                tracing::error!("Failed to send danmaku: {}", e);
+                            }
+                        }
+                    }
+
+                    tw_is_live = false;
+                }
+            }
+
+            if !yt_is_live && !tw_is_live {
+                tokio::time::sleep(Duration::from_secs(cfg.interval)).await;
+                continue 'outer;
+            }
+
             // Clear warning stop since we have a valid channel to stream
             clear_warning_stop();
 
-            // Disable danmaku commands when streaming
-            if is_danmaku_commands_enabled() {
-                enable_danmaku_commands(false);
-            }
             let (platform, channel_name, channel_id, mut area_v2, cfg_title) = if yt_is_live {
                 (
                     "YT",
@@ -413,47 +528,19 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             } else {
                 INVALID_ID_DETECTED.store(false, Ordering::SeqCst);
             }
-            if let Some(keyword) = load_streaming_banned_keywords()
-                .iter()
-                .find(|k| title.as_ref().map_or(false, |t| t.contains(k.as_str())))
-            {
-                // Check if we already warned about this keyword for this stream
-                let should_warn = {
-                    let mut last_warning = LAST_BANNED_KEYWORD_WARNING.lock().unwrap();
-                    let current_warning = format!("{}:{}", keyword, title_str);
-                    if last_warning.as_ref() != Some(&current_warning) {
-                        *last_warning = Some(current_warning);
-                        true
-                    } else {
-                        false
-                    }
-                };
 
-                if should_warn {
-                    tracing::error!("直播标题/分区包含不支持的关键词: {}", keyword);
-                    if let Err(e) =
-                        send_danmaku(&cfg, &format!("错误：标题/分区含:{}", keyword)).await
-                    {
-                        tracing::error!("Failed to send danmaku: {}", e);
-                    }
-                    if cfg.bililive.enable_danmaku_command && !is_danmaku_commands_enabled() {
-                        enable_danmaku_commands(true);
-                        thread::sleep(Duration::from_secs(2));
-                        if let Err(e) = send_danmaku(&cfg, "可使用弹幕指令进行换台").await
-                        {
-                            tracing::error!("Failed to send danmaku: {}", e);
-                        }
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(cfg.interval)).await;
-                continue 'outer;
+            // Disable danmaku commands only once we are committed to this stream (past skip paths).
+            if is_danmaku_commands_enabled() {
+                enable_danmaku_commands(false);
             }
             // Reuse bili_is_live, bili_title, bili_area_id from earlier check (line 200)
             if env::var_os("bili_ffmepg_down").is_none() && !bili_is_live && (area_v2 != 86 || !INVALID_ID_DETECTED.load(Ordering::SeqCst)) {
                 tracing::info!("B站未直播");
                 let area_name = get_area_name(area_v2);
+
+                // Try to start live, but don't crash on error
                 match bili_start_live(&mut cfg, area_v2).await {
-                    Ok(()) => {
+                    Ok(_) => {
                         if bili_title != cfg_title {
                             if let Err(e) = bili_change_live_title(&cfg, &cfg_title).await {
                                 tracing::error!("B站直播标题变更失败: {}", e);
@@ -473,6 +560,7 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
                         continue;
                     }
                 }
+
                 // If auto_cover is enabled, update Bilibili live cover in background
                 if cfg.auto_cover
                     && (bili_title != cfg_title || bili_area_id != area_v2 || video_id_changed)
@@ -684,7 +772,6 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
                 // Check if manual restart was requested (force immediate restart)
                 if was_manual_restart() {
                     tracing::info!("🔄 检测到手动重启请求，立即退出ffmpeg监控循环");
-                    clear_manual_restart();
                     break;
                 }
 
@@ -711,6 +798,10 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             let manual_restart = was_manual_restart();
             let config_updated = is_config_updated();
             let warning_skip = should_skip_due_to_warning(&channel_name);
+
+            if manual_restart {
+                clear_manual_restart();
+            }
 
             // Clear crop settings for both platforms when stream ends
             // Don't clear on manual restart - let it apply for the restarted stream
@@ -766,11 +857,19 @@ async fn run_bilistream(ffmpeg_log_level: &str) -> Result<(), Box<dyn std::error
             };
 
             // Determine what happened and send appropriate message
-            if manual_stop {
+            if manual_restart {
+                if manual_stop {
+                    clear_manual_stop();
+                }
+                tracing::info!("Stream was manually restarted, skipping end danmaku");
+            } else if config_updated {
+                if manual_stop {
+                    clear_manual_stop();
+                }
+                tracing::info!("Stream stopped due to config update/restart, skipping end danmaku");
+            } else if manual_stop {
                 clear_manual_stop();
                 tracing::info!("Stream was stopped manually, skipping end danmaku");
-            } else if config_updated {
-                tracing::info!("Stream stopped due to config update/restart, skipping end danmaku");
             } else if warning_skip {
                 tracing::info!("Stream was stopped due to warning/cut off");
             } else if !current_is_live && bili_is_live {
@@ -2135,7 +2234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("ffmpeg-log-level")
                 .long("ffmpeg-log-level")
                 .value_name("LEVEL")
-                .help("设置ffmpeg日志级别 (error, info, debug)")
+                .help("设置日志级别 (error, info, debug)")
                 .default_value("error")
                 .value_parser(["error", "info", "debug"]),
         )
@@ -2537,7 +2636,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Arg::new("ffmpeg-log-level")
                         .long("ffmpeg-log-level")
                         .value_name("LEVEL")
-                        .help("设置ffmpeg日志级别 (error, info, debug)")
+                        .help("设置日志级别 (error, info, debug)")
                         .default_value("error")
                         .value_parser(["error", "info", "debug"]),
                 )
@@ -2822,12 +2921,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_logger() {
+    let tracing_log_level;
+    if env::var_os("debug_on").is_none() {
+        tracing_log_level = tracing::Level::INFO;
+    } else {
+        tracing_log_level = tracing::Level::DEBUG;
+    }
+    
     tracing_subscriber::fmt()
         .with_timer(fmt::time::ChronoLocal::new("%H:%M:%S".to_string()))
         .with_target(true)
         .with_span_events(fmt::format::FmtSpan::NONE)
         .with_writer(std::io::stdout)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(tracing_log_level)
         .init();
 }
 
@@ -2835,6 +2941,12 @@ fn init_logger_with_capture() {
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::layer::SubscriberExt;
 
+    let tracing_log_level;
+    if env::var_os("debug_on").is_none() {
+        tracing_log_level = LevelFilter::INFO;
+    } else {
+        tracing_log_level = LevelFilter::DEBUG;
+    }
     // Create a custom writer that captures logs
     struct LogCapture;
 
@@ -2920,7 +3032,7 @@ fn init_logger_with_capture() {
 
     let subscriber = tracing_subscriber::registry()
         .with(fmt_layer)
-        .with(LevelFilter::INFO);
+        .with(tracing_log_level);
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 }
 

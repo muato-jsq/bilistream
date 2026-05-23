@@ -1343,7 +1343,6 @@
               </div>
             </div>
           </div>
-
           <div class="info-row">
             <span class="info-label">裁剪</span>
             <div style="display: flex; align-items: center; gap: 8px; flex: 1;">
@@ -2305,6 +2304,9 @@
         }
 
         streamCard.innerHTML = `
+          <a href="https://www.youtube.com/watch?v=${stream.id}" target="_blank" style="display: block; margin: -25px -25px 12px -25px; border-radius: 12px 12px 0 0; overflow: hidden; line-height: 0;">
+            <img src="https://i.ytimg.com/vi/${stream.id}/mqdefault.jpg" alt="" style="width: 100%; display: block; object-fit: cover;">
+          </a>
           <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
             <div>
               ${statusBadge}

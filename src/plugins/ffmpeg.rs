@@ -1,9 +1,9 @@
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::env;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+use std::env;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -29,7 +29,7 @@ lazy_static::lazy_static! {
     static ref LAST_STREAM_TIME: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
     // Track when stream time last changed (Unix timestamp in seconds)
     static ref LAST_STREAM_TIME_UPDATE: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-    // Track when speed first dropped below 0.98 (Unix timestamp in seconds, 0 = speed is OK)
+    // Track when speed first dropped below 0.998 (Unix timestamp in seconds, 0 = speed is OK)
     static ref LOW_SPEED_SINCE: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
 }
 
@@ -229,13 +229,13 @@ fn update_stream_time(stream_time_secs: u32) {
     }
 }
 
-// Update low-speed tracking: record when speed first drops below 0.98, clear when it recovers
+// Update low-speed tracking: record when speed first drops below 0.998, clear when it recovers
 fn update_speed_tracking(speed: f32) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as u32;
-    if speed < 0.98 {
+    if speed < 0.998 {
         // Only set the timestamp if not already tracking a low-speed period
         LOW_SPEED_SINCE
             .compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed)
@@ -280,13 +280,13 @@ pub async fn is_ffmpeg_stuck(timeout_secs: u64) -> bool {
         }
     }
 
-    // Check if speed has been below 0.98 for more than 30 seconds
+    // Check if speed has been below 0.995 for more than 30 seconds
     let low_speed_since = LOW_SPEED_SINCE.load(Ordering::Relaxed);
     if low_speed_since > 0 {
         let low_speed_elapsed = now.saturating_sub(low_speed_since);
         if low_speed_elapsed > 30 {
             tracing::warn!(
-                "ffmpeg speed below 0.98 for {} seconds, deemed stuck",
+                "ffmpeg speed below 0.995 for {} seconds, deemed stuck",
                 low_speed_elapsed
             );
             return true;
@@ -408,14 +408,22 @@ fn extract_compact_stats(line: &str) -> Option<(String, Option<f32>, Option<u32>
 
         let mut speed_value: Option<f32> = None;
         let mut time_value: Option<u32> = None;
+        let parts: Vec<&str> = stats_from_time.split_whitespace().collect();
 
         // Quick parse for speed and time values (for stuck detection)
-        for part in stats_from_time.split_whitespace() {
+        for (idx, part) in parts.iter().enumerate() {
             if let Some(value) = part.strip_prefix("time=") {
                 time_value = parse_time_to_seconds(value);
             } else if let Some(value) = part.strip_prefix("speed=") {
-                // Parse speed value (remove 'x' suffix if present)
-                let clean_value = value.trim_end_matches('x');
+                // Handle both formats:
+                // - "speed=0.99x" (single token)
+                // - "speed=   1x" (value is in next token because of padding)
+                let speed_token = if value.is_empty() {
+                    parts.get(idx + 1).copied().unwrap_or("")
+                } else {
+                    value
+                };
+                let clean_value = speed_token.trim_end_matches('x');
                 if let Ok(parsed) = clean_value.parse::<f32>() {
                     speed_value = Some(parsed);
                 }

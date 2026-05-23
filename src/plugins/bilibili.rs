@@ -373,17 +373,47 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
             .unwrap_or("Unknown error");
 
         match code {
-            60024 => {
+            60024 | 60043 => {
                 // Face verification required
-                if let Some(qr_url) = response["data"]["qr"].as_str() {
-                    return Err(format!("FACE_AUTH_REQUIRED:{}", qr_url).into());
+                let face_auth_url = response["data"]["qr"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        if code == 60043 {
+                            let mid = cfg.bililive.credentials.dede_user_id.trim();
+                            if !mid.is_empty() {
+                                Some(format!(
+                                    "https://www.bilibili.com/blackboard/live/face-auth-middle.html?source_event=400&mid={}",
+                                    mid
+                                ))
+                            } else {
+                                Some(
+                                    "https://www.bilibili.com/blackboard/live/face-auth-middle.html?source_event=400"
+                                        .to_string(),
+                                )
+                            }
+                        } else {
+                            None
+                        }
+                    });
+
+                tracing::error!("❌ Bilibili 开播失败 (错误码: {}): {}", code, message);
+                tracing::error!("FACE_AUTH_REQUIRED 完整响应: {:#?}", response);
+
+                tracing::debug!("request body: {}", query_string);
+                if let Some(face_auth_url) = face_auth_url {
+                    return Err(format!("FACE_AUTH_REQUIRED:{}", face_auth_url).into());
                 }
+
+                return Err(format!("开播失败，请通过开播认证按钮进行人脸识别! (错误码 {}): {}", code, message).into());
             }
             60031 => {
                 // Abnormal streaming behavior - temporary ban
                 tracing::error!("❌ Bilibili 开播失败 (错误码: {})", code);
                 tracing::error!("📛 {}", message);
-                return Err(message.into());
+                return Err(format!("{}{}", response, message).into());
             }
             _ => {
                 tracing::error!("❌ Bilibili 开播失败 (错误码: {}): {}", code, message);
@@ -394,12 +424,10 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
     }
 
     // Extract RTMP information from the response
-    let mut wrong = false;
     if response["code"].as_i64() == Some(0) {
         if let Some(rtmp_data) = response["data"]["rtmp"].as_object() {
             if let (Some(addr), Some(code)) = (rtmp_data.get("addr"), rtmp_data.get("code")) {
                 if let (Some(rtmp_url), Some(rtmp_key)) = (addr.as_str(), code.as_str()) {
-                    if rtmp_key == "" { wrong = true; }
                     // Update config with new RTMP info
                     cfg.bililive.bili_rtmp_url = rtmp_url.to_string();
                     cfg.bililive.bili_rtmp_key = rtmp_key.to_string();
@@ -409,15 +437,9 @@ pub async fn bili_start_live(cfg: &mut Config, area_v2: u64) -> Result<(), Box<d
                     std::fs::write(&*CONFIG_PATH, updated_json)?;
 
                     // tracing::info!("Updated RTMP information in config");
-                } else { wrong = true; }
-            } else { wrong = true; }
-        } else { wrong = true; }
-    } else { wrong = true; }
-    if wrong {
-        tracing::debug!("Failed to start live: {}", response);
-        tracing::debug!("request cookie: {}", cookie);
-        tracing::debug!("request body: {}", query_string);
-        return Err("开播失败，请通过开播认证按钮进行人脸识别!".into());
+                }
+            }
+        }
     }
 
     Ok(())

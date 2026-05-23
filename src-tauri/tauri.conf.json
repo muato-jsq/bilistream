@@ -10,10 +10,6 @@
     "windows": [],
     "security": {
       "csp": null
-    },
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": false
     }
   },
   "bundle": {
@@ -23,6 +19,11 @@
       "icons/icon.png",
       "icons/icon.ico",
       "icons/icon.svg"
-    ]
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
+    }
   }
 }
